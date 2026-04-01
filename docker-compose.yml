@@ -1,0 +1,68 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: kyriaki
+      POSTGRES_USER: kyriaki
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-kyriaki_dev}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - kyriaki-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kyriaki -d kyriaki"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      KYRIAKI_DATABASE_URL: "postgresql+asyncpg://kyriaki:${DB_PASSWORD:-kyriaki_dev}@db:5432/kyriaki"
+      KYRIAKI_ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      KYRIAKI_ENVIRONMENT: "production"
+      KYRIAKI_LOG_FORMAT: "json"
+    ports:
+      - "8000:8000"
+    networks:
+      - kyriaki-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "3000:80"
+    networks:
+      - kyriaki-net
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:80/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+networks:
+  kyriaki-net:
+    driver: bridge
+
+volumes:
+  postgres_data:

@@ -1,26 +1,23 @@
 import asyncio
 import json
-import os
 import re
 import time
 from typing import Dict, List, Optional
 
 import anthropic
 
+from config import get_settings
+from logging_config import get_logger
 from models import PatientProfile, TrialMatch, CriterionEvaluation
 from prompts import ELIGIBILITY_ANALYSIS_PROMPT, PATIENT_SUMMARY_PROMPT
 from trials_client import search_trials, find_nearest_site
 
-MAX_CONCURRENT_ANALYSES = 1
-MODEL = "claude-sonnet-4-20250514"
-MAX_RETRIES = 1
-
-# Delay between sequential Claude API calls (seconds) to stay under output token rate limits
-INTER_CALL_DELAY = 2.0
+logger = get_logger("kyriaki.matching")
 
 
 def _get_client() -> anthropic.AsyncAnthropic:
-    return anthropic.AsyncAnthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+    settings = get_settings()
+    return anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
 
 
 async def _call_claude_with_retry(
@@ -31,7 +28,6 @@ async def _call_claude_with_retry(
     messages: list,
     max_retries: int = 3,
 ) -> anthropic.types.Message:
-    """Call Claude API with exponential backoff retry on rate limit (429) errors."""
     for attempt in range(max_retries):
         try:
             return await client.messages.create(
@@ -43,21 +39,20 @@ async def _call_claude_with_retry(
             if attempt == max_retries - 1:
                 raise
             wait_time = 2 ** attempt * 2
-            print(f"[MATCH] Rate limited (429), retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})...")
+            logger.warning("claude.rate_limited", attempt=attempt + 1, max_retries=max_retries, wait_s=wait_time)
             await asyncio.sleep(wait_time)
         except anthropic.APIStatusError as e:
             if e.status_code == 429:
                 if attempt == max_retries - 1:
                     raise
                 wait_time = 2 ** attempt * 2
-                print(f"[MATCH] Rate limited (429), retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})...")
+                logger.warning("claude.rate_limited", attempt=attempt + 1, max_retries=max_retries, wait_s=wait_time)
                 await asyncio.sleep(wait_time)
             else:
                 raise
     raise RuntimeError("Exhausted retries without success or exception")
 
 
-# Timestamp of last Claude API call, used to pace sequential calls
 _last_call_time: float = 0.0
 _call_lock = asyncio.Lock()
 
@@ -69,13 +64,13 @@ async def _paced_claude_call(
     max_tokens: int,
     messages: list,
 ) -> anthropic.types.Message:
-    """Call Claude with rate-limit-aware pacing and retry."""
     global _last_call_time
+    settings = get_settings()
     async with _call_lock:
         now = time.monotonic()
         elapsed = now - _last_call_time
-        if elapsed < INTER_CALL_DELAY:
-            await asyncio.sleep(INTER_CALL_DELAY - elapsed)
+        if elapsed < settings.inter_call_delay:
+            await asyncio.sleep(settings.inter_call_delay - elapsed)
         result = await _call_claude_with_retry(
             client, model=model, max_tokens=max_tokens, messages=messages
         )
@@ -84,25 +79,21 @@ async def _paced_claude_call(
 
 
 def _parse_json_response(text: str) -> Optional[Dict]:
-    """Parse a JSON response from Claude, handling common issues."""
     if not text:
         return None
 
     text = text.strip()
 
-    # Strip markdown code fences if present
     if text.startswith("```"):
         text = re.sub(r"^```\w*\n?", "", text)
         text = re.sub(r"\n?```\s*$", "", text)
         text = text.strip()
 
-    # Try parsing as-is first
     try:
         return json.loads(text)
     except json.JSONDecodeError:
         pass
 
-    # Try to extract JSON object from surrounding text
     first_brace = text.find("{")
     last_brace = text.rfind("}")
     if first_brace != -1 and last_brace > first_brace:
@@ -111,7 +102,6 @@ def _parse_json_response(text: str) -> Optional[Dict]:
         except json.JSONDecodeError:
             pass
 
-    # Attempt to fix truncated JSON
     if first_brace != -1:
         partial = text[first_brace:]
         repaired = _repair_truncated_json(partial)
@@ -125,7 +115,6 @@ def _parse_json_response(text: str) -> Optional[Dict]:
 
 
 def _repair_truncated_json(text: str) -> Optional[str]:
-    """Try to repair truncated JSON by closing open structures."""
     stack = []
     in_string = False
     escape_next = False
@@ -170,7 +159,6 @@ def _repair_truncated_json(text: str) -> Optional[str]:
 
 
 def _extract_minimal_result(text: str, nct_id: str) -> Optional[Dict]:
-    """Last-resort extraction: try to pull a score and explanation from unparseable text."""
     score_match = re.search(r'"match_score"\s*:\s*(\d+)', text)
     explanation_match = re.search(r'"match_explanation"\s*:\s*"([^"]*)"', text)
 
@@ -188,12 +176,11 @@ def _extract_minimal_result(text: str, nct_id: str) -> Optional[Dict]:
 async def _analyze_trial(
     patient: PatientProfile, trial: Dict, trial_index: int = 0, total_trials: int = 0
 ) -> Optional[Dict]:
-    """Use Claude to analyze a single trial's eligibility criteria against the patient."""
+    settings = get_settings()
     label = f"{trial_index}/{total_trials}" if total_trials else ""
     nct_id = trial["nct_id"]
-    print(f"[MATCH] Analyzing trial {label}: {nct_id} — {trial['brief_title'][:60]}...")
+    logger.info("trial.analyze_start", nct_id=nct_id, label=label, title=trial["brief_title"][:60])
 
-    # Truncate very long eligibility text
     eligibility_text = trial["eligibility_criteria"]
     if len(eligibility_text) > 6000:
         eligibility_text = eligibility_text[:6000] + "\n\n[Eligibility text truncated — focus on the criteria above]"
@@ -217,11 +204,11 @@ async def _analyze_trial(
         eligibility_criteria=eligibility_text,
     )
 
-    for attempt in range(MAX_RETRIES + 1):
+    for attempt in range(settings.max_retries + 1):
         try:
             response = await _paced_claude_call(
                 _get_client(),
-                model=MODEL,
+                model=settings.claude_model,
                 max_tokens=1500,
                 messages=[{"role": "user", "content": prompt}],
             )
@@ -231,27 +218,28 @@ async def _analyze_trial(
             if result is not None:
                 if "match_score" not in result:
                     result["match_score"] = 0
+                logger.info("trial.analyze_complete", nct_id=nct_id, score=result["match_score"])
                 return result
 
-            if attempt < MAX_RETRIES:
-                print(f"[MATCH] Parse failed for {nct_id}, retrying ({attempt + 1}/{MAX_RETRIES})...")
+            if attempt < settings.max_retries:
+                logger.warning("trial.parse_failed", nct_id=nct_id, attempt=attempt + 1)
                 continue
 
-            print(f"[MATCH] Failed to parse Claude response for {nct_id} after {MAX_RETRIES + 1} attempts")
+            logger.error("trial.parse_exhausted", nct_id=nct_id, attempts=settings.max_retries + 1)
             return _extract_minimal_result(text, nct_id)
 
         except Exception as e:
-            if attempt < MAX_RETRIES:
-                print(f"[MATCH] Error analyzing {nct_id}: {type(e).__name__}: {e}, retrying...")
+            if attempt < settings.max_retries:
+                logger.warning("trial.analyze_error", nct_id=nct_id, error=str(e), attempt=attempt + 1)
                 continue
-            print(f"[MATCH] Error analyzing {nct_id}: {type(e).__name__}: {e}")
+            logger.error("trial.analyze_failed", nct_id=nct_id, error=str(e))
             return None
 
     return None
 
 
 async def _generate_patient_summary(patient: PatientProfile) -> str:
-    """Generate a brief empathetic summary of the patient's profile."""
+    settings = get_settings()
     prompt = PATIENT_SUMMARY_PROMPT.format(
         cancer_type=patient.cancer_type,
         cancer_stage=patient.cancer_stage,
@@ -266,13 +254,13 @@ async def _generate_patient_summary(patient: PatientProfile) -> str:
     try:
         response = await _paced_claude_call(
             _get_client(),
-            model=MODEL,
+            model=settings.claude_model,
             max_tokens=300,
             messages=[{"role": "user", "content": prompt}],
         )
         return response.content[0].text.strip()
     except Exception as e:
-        print(f"[MATCH] Patient summary error: {type(e).__name__}: {e}")
+        logger.warning("patient_summary.fallback", error=str(e))
         treatments_str = ", ".join(patient.prior_treatments) if patient.prior_treatments else None
         biomarkers_str = ", ".join(patient.biomarkers) if patient.biomarkers else None
 
@@ -286,7 +274,6 @@ async def _generate_patient_summary(patient: PatientProfile) -> str:
 
 
 def _build_unscored_match(trial: Dict, patient: PatientProfile) -> TrialMatch:
-    """Build a TrialMatch with score 0 from raw trial data (used as fallback)."""
     nearest_site, distance = find_nearest_site(
         trial.get("locations", []), patient.location_zip
     )
@@ -310,9 +297,8 @@ def _build_unscored_match(trial: Dict, patient: PatientProfile) -> TrialMatch:
 
 
 async def match_trials(patient: PatientProfile, max_results: int = 10) -> Dict:
-    """Full matching pipeline: search -> analyze -> rank -> return."""
+    settings = get_settings()
 
-    # Step 1: Search ClinicalTrials.gov
     trials = await search_trials(
         cancer_type=patient.cancer_type,
         age=patient.age,
@@ -320,26 +306,23 @@ async def match_trials(patient: PatientProfile, max_results: int = 10) -> Dict:
     )
 
     total = len(trials)
-    print(f"[MATCH] Found {total} candidate trials, beginning analysis...")
+    logger.info("match.search_complete", candidate_trials=total)
 
-    # Step 2: Analyze each trial with Claude (with concurrency limit)
-    semaphore = asyncio.Semaphore(MAX_CONCURRENT_ANALYSES)
+    semaphore = asyncio.Semaphore(settings.max_concurrent_analyses)
 
     async def analyze_with_limit(trial: Dict, index: int):
         async with semaphore:
             return trial, await _analyze_trial(patient, trial, index, total)
 
-    # Run patient summary generation concurrently with trial analyses
     summary_task = asyncio.create_task(_generate_patient_summary(patient))
     analysis_tasks = [analyze_with_limit(trial, i + 1) for i, trial in enumerate(trials)]
     results = await asyncio.gather(*analysis_tasks)
 
-    # Step 3: Build TrialMatch objects and rank
     matches: List[TrialMatch] = []
     all_analyses_failed = all(analysis is None for _, analysis in results)
 
     if all_analyses_failed and trials:
-        print("[MATCH] All Claude analyses failed — returning unscored trial list as fallback.")
+        logger.warning("match.all_analyses_failed", fallback="unscored")
         for trial, _ in results:
             match = _build_unscored_match(trial, patient)
             if match.distance_miles is None or match.distance_miles <= patient.willing_to_travel_miles:
@@ -386,6 +369,8 @@ async def match_trials(patient: PatientProfile, max_results: int = 10) -> Dict:
     matches = matches[:max_results]
 
     patient_summary = await summary_task
+
+    logger.info("match.complete", total_screened=total, matches_returned=len(matches))
 
     return {
         "patient_summary": patient_summary,

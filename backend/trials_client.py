@@ -1,8 +1,17 @@
+from __future__ import annotations
+
 from typing import Dict, List, Optional, Tuple
+import asyncio
+import math
 import time
 
 import httpx
-import math
+
+from config import get_settings
+from geocoding import get_coordinates
+from logging_config import get_logger
+
+logger = get_logger("kyriaki.trials")
 
 BASE_URL = "https://clinicaltrials.gov/api/v2"
 
@@ -21,37 +30,6 @@ FIELDS = ",".join([
 
 # Simple in-memory cache: key -> (timestamp, data)
 _search_cache: Dict[str, Tuple[float, List[Dict]]] = {}
-CACHE_TTL = 300  # 5 minutes
-
-# Approximate lat/lon for US ZIP codes (first 3 digits).
-# For a real product, use a geocoding API. This is good enough for the prototype.
-ZIP_PREFIX_COORDS: Dict[str, Tuple[float, float]] = {
-    "100": (40.71, -74.01),   # NYC
-    "021": (42.36, -71.06),   # Boston
-    "606": (41.88, -87.63),   # Chicago
-    "770": (29.76, -95.37),   # Houston
-    "900": (34.05, -118.24),  # LA
-    "941": (37.77, -122.42),  # SF
-    "200": (38.91, -77.04),   # DC
-    "303": (33.75, -84.39),   # Atlanta
-    "331": (25.76, -80.19),   # Miami
-    "981": (47.61, -122.33),  # Seattle
-    "852": (33.45, -112.07),  # Phoenix
-    "802": (39.74, -104.99),  # Denver
-    "191": (39.95, -75.17),   # Philadelphia
-    "481": (42.33, -83.05),   # Detroit
-    "551": (44.98, -93.27),   # Minneapolis
-}
-
-
-def _zip_to_coords(zip_code: str) -> Optional[Tuple[float, float]]:
-    """Best-effort ZIP to lat/lon. Returns None if unknown."""
-    for prefix_len in (3, 2, 1):
-        prefix = zip_code[:prefix_len]
-        if prefix in ZIP_PREFIX_COORDS:
-            return ZIP_PREFIX_COORDS[prefix]
-    # Default to geographic center of US
-    return (39.8, -98.6)
 
 
 def _haversine_miles(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -71,7 +49,7 @@ def find_nearest_site(
     locations: List[Dict], patient_zip: str
 ) -> Tuple[Optional[Dict], Optional[float]]:
     """Find the nearest trial site to the patient's ZIP code."""
-    patient_coords = _zip_to_coords(patient_zip)
+    patient_coords = get_coordinates(patient_zip)
     if not patient_coords or not locations:
         return None, None
 
@@ -103,7 +81,6 @@ def find_nearest_site(
 
 
 def _extract_study(study: Dict) -> Dict:
-    """Flatten the nested ClinicalTrials.gov study structure."""
     ps = study.get("protocolSection", {})
     ident = ps.get("identificationModule", {})
     status = ps.get("statusModule", {})
@@ -140,7 +117,6 @@ def _extract_study(study: Dict) -> Dict:
 
 
 def _parse_age_years(age_str: str) -> Optional[int]:
-    """Parse '18 Years' -> 18."""
     if not age_str:
         return None
     parts = age_str.split()
@@ -155,11 +131,11 @@ def _cache_key(cancer_type: str, age: Optional[int], sex: Optional[str], page_si
 
 
 def _get_cached(key: str) -> Optional[List[Dict]]:
-    """Return cached result if within TTL, otherwise None."""
+    settings = get_settings()
     if key in _search_cache:
         ts, data = _search_cache[key]
-        if time.time() - ts < CACHE_TTL:
-            print(f"[TRIALS] Cache hit for: {key}")
+        if time.time() - ts < settings.cache_ttl:
+            logger.debug("trials.cache_hit", key=key)
             return data
         else:
             del _search_cache[key]
@@ -176,7 +152,6 @@ async def _http_get_with_retry(
     max_retries: int = 3,
     timeout: float = 30,
 ) -> httpx.Response:
-    """GET request with retry on transient network errors."""
     last_exc: Exception | None = None
     for attempt in range(max_retries):
         try:
@@ -187,15 +162,13 @@ async def _http_get_with_retry(
         except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout) as e:
             last_exc = e
             wait = 2 ** attempt
-            print(f"[TRIALS] Network error ({type(e).__name__}), retrying in {wait}s (attempt {attempt + 1}/{max_retries})...")
-            import asyncio
+            logger.warning("trials.network_error", error_type=type(e).__name__, attempt=attempt + 1, wait_s=wait)
             await asyncio.sleep(wait)
         except httpx.HTTPStatusError as e:
             if e.response.status_code in (429, 500, 502, 503, 504):
                 last_exc = e
                 wait = 2 ** attempt
-                print(f"[TRIALS] HTTP {e.response.status_code}, retrying in {wait}s (attempt {attempt + 1}/{max_retries})...")
-                import asyncio
+                logger.warning("trials.http_error", status=e.response.status_code, attempt=attempt + 1, wait_s=wait)
                 await asyncio.sleep(wait)
             else:
                 raise
@@ -208,7 +181,6 @@ async def search_trials(
     sex: Optional[str] = None,
     page_size: int = 10,
 ) -> List[Dict]:
-    """Search ClinicalTrials.gov for recruiting trials matching the cancer type."""
     cache_k = _cache_key(cancer_type, age, sex, page_size)
     cached = _get_cached(cache_k)
     if cached is not None:
@@ -225,11 +197,11 @@ async def search_trials(
     try:
         data = resp.json()
     except Exception as e:
-        print(f"[TRIALS] Failed to parse JSON response: {e}")
+        logger.error("trials.json_parse_failed", error=str(e))
         return []
 
     if not isinstance(data, dict) or "studies" not in data:
-        print(f"[TRIALS] Unexpected API response structure: {list(data.keys()) if isinstance(data, dict) else type(data)}")
+        logger.error("trials.unexpected_response", keys=list(data.keys()) if isinstance(data, dict) else str(type(data)))
         return []
 
     studies = []
@@ -237,10 +209,9 @@ async def search_trials(
         try:
             study = _extract_study(study_raw)
         except Exception as e:
-            print(f"[TRIALS] Failed to extract study: {e}")
+            logger.warning("trials.extract_failed", error=str(e))
             continue
 
-        # Pre-filter: age
         if age is not None:
             min_age = _parse_age_years(study.get("minimum_age", ""))
             max_age = _parse_age_years(study.get("maximum_age", ""))
@@ -249,7 +220,6 @@ async def search_trials(
             if max_age and age > max_age:
                 continue
 
-        # Pre-filter: sex
         if sex and study.get("sex") != "ALL":
             if study["sex"].upper() != sex.upper():
                 continue
@@ -261,7 +231,6 @@ async def search_trials(
 
 
 async def get_trial(nct_id: str) -> Optional[Dict]:
-    """Fetch a single trial by NCT ID."""
     params = {"fields": FIELDS}
     try:
         resp = await _http_get_with_retry(f"{BASE_URL}/studies/{nct_id}", params)
@@ -272,7 +241,7 @@ async def get_trial(nct_id: str) -> Optional[Dict]:
     try:
         data = resp.json()
     except Exception as e:
-        print(f"[TRIALS] Failed to parse JSON for {nct_id}: {e}")
+        logger.error("trials.json_parse_failed", nct_id=nct_id, error=str(e))
         return None
 
     return _extract_study(data)

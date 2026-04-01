@@ -1,0 +1,29 @@
+# Development overrides — use with:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    volumes:
+      - ./backend:/app/backend
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    environment:
+      KYRIAKI_DATABASE_URL: "postgresql+asyncpg://kyriaki:${DB_PASSWORD:-kyriaki_dev}@db:5432/kyriaki"
+      KYRIAKI_ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      KYRIAKI_ENVIRONMENT: "development"
+      KYRIAKI_LOG_FORMAT: "text"
+      KYRIAKI_LOG_LEVEL: "DEBUG"
+
+  frontend:
+    build:
+      context: ./frontend
+      target: builder
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    command: ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "5173"]
+    ports:
+      - "5173:5173"
+    environment:
+      VITE_API_URL: http://localhost:8000
