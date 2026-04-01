@@ -116,12 +116,13 @@ async def test_matching_agent(session: AsyncSession, patient: PatientProfileDB) 
         print(f"  Matches found:   {len(matches)}")
         print(f"  Patient summary: {task.output_data.get('patient_summary', '')[:120]}...")
         for i, m in enumerate(matches):
-            print(f"    [{i+1}] {m['nct_id']} — score {m.get('match_score', '?')}: {m['brief_title'][:70]}")
+            print(f"    [{i + 1}] {m['nct_id']} — score {m.get('match_score', '?')}: {m['brief_title'][:70]}")
 
     # Check events
     events = [obj for obj in session.new | session.dirty if isinstance(obj, AgentEventDB)]
     # Query instead since objects were already flushed
     from sqlalchemy import select
+
     result = await session.execute(
         select(AgentEventDB).where(AgentEventDB.task_id == task.id).order_by(AgentEventDB.created_at)
     )
@@ -178,9 +179,8 @@ async def test_dossier_agent(
 
     # Check for human gate
     from sqlalchemy import select
-    result = await session.execute(
-        select(HumanGateDB).where(HumanGateDB.task_id == task.id)
-    )
+
+    result = await session.execute(select(HumanGateDB).where(HumanGateDB.task_id == task.id))
     gates = list(result.scalars().all())
 
     if gates:
@@ -201,9 +201,8 @@ async def test_gate_resolution(session: AsyncSession, dossier_task: AgentTaskDB)
     print("\n--- STEP 3: Gate Resolution ---")
 
     from sqlalchemy import select
-    result = await session.execute(
-        select(HumanGateDB).where(HumanGateDB.task_id == dossier_task.id)
-    )
+
+    result = await session.execute(select(HumanGateDB).where(HumanGateDB.task_id == dossier_task.id))
     gate = result.scalars().first()
     assert gate is not None, "No gate found"
 
@@ -269,6 +268,7 @@ async def run_all():
             await session.rollback()
             print(f"\n[FAIL] Unhandled exception: {type(e).__name__}: {e}")
             import traceback
+
             traceback.print_exc()
             return False
 

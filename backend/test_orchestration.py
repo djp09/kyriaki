@@ -284,7 +284,10 @@ class TestMatchingAgent:
             emitted.append((event_type, data))
 
         ctx = AgentContext(
-            task_id=uuid.uuid4(), patient_id=uuid.uuid4(), input_data={"patient": sample_patient_data, "max_results": 5}, emit=mock_emit
+            task_id=uuid.uuid4(),
+            patient_id=uuid.uuid4(),
+            input_data={"patient": sample_patient_data, "max_results": 5},
+            emit=mock_emit,
         )
 
         mock_match = MagicMock()
@@ -316,7 +319,10 @@ class TestMatchingAgent:
             task_id=uuid.uuid4(), patient_id=uuid.uuid4(), input_data={"patient": sample_patient_data}, emit=mock_emit
         )
 
-        with patch("agents.match_trials", new_callable=AsyncMock, side_effect=RuntimeError("boom")), pytest.raises(RuntimeError, match="boom"):
+        with (
+            patch("agents.match_trials", new_callable=AsyncMock, side_effect=RuntimeError("boom")),
+            pytest.raises(RuntimeError, match="boom"),
+        ):
             await agent.execute(ctx)
 
 
@@ -354,7 +360,15 @@ class TestDossierAgent:
                     {
                         "revised_score": 92,
                         "score_justification": "Very strong match",
-                        "criteria_analysis": [{"criterion": "Stage IV", "type": "inclusion", "status": "met", "evidence": "Patient is Stage IV", "notes": ""}],
+                        "criteria_analysis": [
+                            {
+                                "criterion": "Stage IV",
+                                "type": "inclusion",
+                                "status": "met",
+                                "evidence": "Patient is Stage IV",
+                                "notes": "",
+                            }
+                        ],
                         "patient_summary": "You are a good candidate.",
                         "clinical_summary": "Meets all criteria.",
                         "next_steps": ["Call the site"],

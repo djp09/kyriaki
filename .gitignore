@@ -11,3 +11,6 @@ __pycache__/
 node_modules/
 frontend/dist/
 .claude/
+
+# Design docs (keep out of repo)
+Kyriaki_*.md
