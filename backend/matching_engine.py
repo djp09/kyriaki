@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import re
 import time
 from typing import Dict, List, Optional
 
@@ -12,6 +13,7 @@ from trials_client import search_trials, find_nearest_site
 
 MAX_CONCURRENT_ANALYSES = 1
 MODEL = "claude-sonnet-4-20250514"
+MAX_RETRIES = 1
 
 # Delay between sequential Claude API calls (seconds) to stay under output token rate limits
 INTER_CALL_DELAY = 2.0
@@ -37,10 +39,10 @@ async def _call_claude_with_retry(
                 max_tokens=max_tokens,
                 messages=messages,
             )
-        except anthropic.RateLimitError as e:
+        except anthropic.RateLimitError:
             if attempt == max_retries - 1:
                 raise
-            wait_time = 2 ** attempt * 2  # 2s, 4s, 8s
+            wait_time = 2 ** attempt * 2
             print(f"[MATCH] Rate limited (429), retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})...")
             await asyncio.sleep(wait_time)
         except anthropic.APIStatusError as e:
@@ -52,7 +54,6 @@ async def _call_claude_with_retry(
                 await asyncio.sleep(wait_time)
             else:
                 raise
-    # Should not reach here, but just in case
     raise RuntimeError("Exhausted retries without success or exception")
 
 
@@ -82,6 +83,108 @@ async def _paced_claude_call(
         return result
 
 
+def _parse_json_response(text: str) -> Optional[Dict]:
+    """Parse a JSON response from Claude, handling common issues."""
+    if not text:
+        return None
+
+    text = text.strip()
+
+    # Strip markdown code fences if present
+    if text.startswith("```"):
+        text = re.sub(r"^```\w*\n?", "", text)
+        text = re.sub(r"\n?```\s*$", "", text)
+        text = text.strip()
+
+    # Try parsing as-is first
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # Try to extract JSON object from surrounding text
+    first_brace = text.find("{")
+    last_brace = text.rfind("}")
+    if first_brace != -1 and last_brace > first_brace:
+        try:
+            return json.loads(text[first_brace : last_brace + 1])
+        except json.JSONDecodeError:
+            pass
+
+    # Attempt to fix truncated JSON
+    if first_brace != -1:
+        partial = text[first_brace:]
+        repaired = _repair_truncated_json(partial)
+        if repaired is not None:
+            try:
+                return json.loads(repaired)
+            except json.JSONDecodeError:
+                pass
+
+    return None
+
+
+def _repair_truncated_json(text: str) -> Optional[str]:
+    """Try to repair truncated JSON by closing open structures."""
+    stack = []
+    in_string = False
+    escape_next = False
+
+    for ch in text:
+        if escape_next:
+            escape_next = False
+            continue
+        if ch == "\\":
+            if in_string:
+                escape_next = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+
+        if ch in "{[":
+            stack.append("}" if ch == "{" else "]")
+        elif ch in "}]":
+            if stack and stack[-1] == ch:
+                stack.pop()
+
+    if not stack:
+        return text
+
+    truncated = text
+
+    if in_string:
+        truncated += '"'
+
+    truncated = re.sub(r',\s*"[^"]*$', "", truncated)
+    truncated = re.sub(r',\s*$', "", truncated)
+    truncated = re.sub(r':\s*"[^"]*$', ': ""', truncated)
+    truncated = re.sub(r":\s*$", ': null', truncated)
+
+    for closer in reversed(stack):
+        truncated += closer
+
+    return truncated
+
+
+def _extract_minimal_result(text: str, nct_id: str) -> Optional[Dict]:
+    """Last-resort extraction: try to pull a score and explanation from unparseable text."""
+    score_match = re.search(r'"match_score"\s*:\s*(\d+)', text)
+    explanation_match = re.search(r'"match_explanation"\s*:\s*"([^"]*)"', text)
+
+    if score_match:
+        return {
+            "match_score": int(score_match.group(1)),
+            "match_explanation": explanation_match.group(1) if explanation_match else "Analysis could not be fully parsed. Please review the trial details with your oncologist.",
+            "inclusion_evaluations": [],
+            "exclusion_evaluations": [],
+            "flags_for_oncologist": ["Full eligibility analysis was incomplete — discuss all criteria with your oncologist"],
+        }
+    return None
+
+
 async def _analyze_trial(
     patient: PatientProfile, trial: Dict, trial_index: int = 0, total_trials: int = 0
 ) -> Optional[Dict]:
@@ -89,6 +192,11 @@ async def _analyze_trial(
     label = f"{trial_index}/{total_trials}" if total_trials else ""
     nct_id = trial["nct_id"]
     print(f"[MATCH] Analyzing trial {label}: {nct_id} — {trial['brief_title'][:60]}...")
+
+    # Truncate very long eligibility text
+    eligibility_text = trial["eligibility_criteria"]
+    if len(eligibility_text) > 6000:
+        eligibility_text = eligibility_text[:6000] + "\n\n[Eligibility text truncated — focus on the criteria above]"
 
     prompt = ELIGIBILITY_ANALYSIS_PROMPT.format(
         cancer_type=patient.cancer_type,
@@ -106,30 +214,40 @@ async def _analyze_trial(
         brief_title=trial["brief_title"],
         phase=trial["phase"],
         brief_summary=trial["brief_summary"],
-        eligibility_criteria=trial["eligibility_criteria"],
+        eligibility_criteria=eligibility_text,
     )
 
-    try:
-        response = await _paced_claude_call(
-            _get_client(),
-            model=MODEL,
-            max_tokens=1500,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        text = response.content[0].text.strip()
-        # Strip markdown code fences if present
-        if text.startswith("```"):
-            text = text.split("\n", 1)[1] if "\n" in text else text[3:]
-            if text.endswith("```"):
-                text = text[:-3]
-            text = text.strip()
-        return json.loads(text)
-    except (json.JSONDecodeError, IndexError, KeyError) as e:
-        print(f"[MATCH] Failed to parse Claude response for {nct_id}: {e}")
-        return None
-    except Exception as e:
-        print(f"[MATCH] Error analyzing {nct_id}: {type(e).__name__}: {e}")
-        return None
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            response = await _paced_claude_call(
+                _get_client(),
+                model=MODEL,
+                max_tokens=1500,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            text = response.content[0].text.strip()
+            result = _parse_json_response(text)
+
+            if result is not None:
+                if "match_score" not in result:
+                    result["match_score"] = 0
+                return result
+
+            if attempt < MAX_RETRIES:
+                print(f"[MATCH] Parse failed for {nct_id}, retrying ({attempt + 1}/{MAX_RETRIES})...")
+                continue
+
+            print(f"[MATCH] Failed to parse Claude response for {nct_id} after {MAX_RETRIES + 1} attempts")
+            return _extract_minimal_result(text, nct_id)
+
+        except Exception as e:
+            if attempt < MAX_RETRIES:
+                print(f"[MATCH] Error analyzing {nct_id}: {type(e).__name__}: {e}, retrying...")
+                continue
+            print(f"[MATCH] Error analyzing {nct_id}: {type(e).__name__}: {e}")
+            return None
+
+    return None
 
 
 async def _generate_patient_summary(patient: PatientProfile) -> str:
@@ -155,7 +273,16 @@ async def _generate_patient_summary(patient: PatientProfile) -> str:
         return response.content[0].text.strip()
     except Exception as e:
         print(f"[MATCH] Patient summary error: {type(e).__name__}: {e}")
-        return f"{patient.age}-year-old {patient.sex} with {patient.cancer_stage} {patient.cancer_type}."
+        treatments_str = ", ".join(patient.prior_treatments) if patient.prior_treatments else None
+        biomarkers_str = ", ".join(patient.biomarkers) if patient.biomarkers else None
+
+        summary = f"You are a {patient.age}-year-old navigating {patient.cancer_stage} {patient.cancer_type}."
+        if treatments_str:
+            summary += f" You have been through {patient.lines_of_therapy} line(s) of treatment including {treatments_str}."
+        if biomarkers_str:
+            summary += f" Your biomarker profile includes {biomarkers_str}."
+        summary += " We are searching for clinical trials that may be a good fit for your specific situation."
+        return summary
 
 
 def _build_unscored_match(trial: Dict, patient: PatientProfile) -> TrialMatch:
@@ -212,7 +339,6 @@ async def match_trials(patient: PatientProfile, max_results: int = 10) -> Dict:
     all_analyses_failed = all(analysis is None for _, analysis in results)
 
     if all_analyses_failed and trials:
-        # Fallback: return unscored trial list so the patient still gets something
         print("[MATCH] All Claude analyses failed — returning unscored trial list as fallback.")
         for trial, _ in results:
             match = _build_unscored_match(trial, patient)
@@ -227,7 +353,6 @@ async def match_trials(patient: PatientProfile, max_results: int = 10) -> Dict:
                 trial.get("locations", []), patient.location_zip
             )
 
-            # Skip trials beyond travel distance (if we have distance info)
             if distance is not None and distance > patient.willing_to_travel_miles:
                 continue
 
@@ -257,7 +382,6 @@ async def match_trials(patient: PatientProfile, max_results: int = 10) -> Dict:
                 )
             )
 
-    # Sort by match score descending
     matches.sort(key=lambda m: m.match_score, reverse=True)
     matches = matches[:max_results]
 
