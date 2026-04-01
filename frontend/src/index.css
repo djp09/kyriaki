@@ -503,6 +503,25 @@ header h1 {
   font-size: 0.93rem;
 }
 
+.pipeline-step {
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  border-radius: 10px;
+  padding: 1rem 1.25rem;
+}
+
+.pipeline-step-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.95rem;
+  color: #16213e;
+}
+
+.pipeline-step-detail {
+  margin-left: 1.75rem;
+}
+
 .agent-badge {
   display: inline-flex;
   align-items: center;

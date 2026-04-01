@@ -88,11 +88,13 @@ export async function getTask(taskId) {
   return request(`${BASE}/agents/tasks/${taskId}`);
 }
 
-export async function resolveGate(gateId, status, resolvedBy, notes = null) {
+export async function resolveGate(gateId, status, resolvedBy, notes = null, chainToTrial = null) {
+  const body = { status, resolved_by: resolvedBy, notes };
+  if (chainToTrial) body.chain_to_trial = chainToTrial;
   return request(`${BASE}/agents/gates/${gateId}/resolve`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ status, resolved_by: resolvedBy, notes }),
+    body: JSON.stringify(body),
   });
 }
 
