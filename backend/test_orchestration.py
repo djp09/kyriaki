@@ -103,6 +103,10 @@ class FakeSession:
         if hasattr(obj, "id") and obj.id:
             self._store[(type(obj), obj.id)] = obj
 
+    def add_all(self, objs: list) -> None:
+        for obj in objs:
+            self.add(obj)
+
     async def flush(self) -> None:
         for obj in self.added:
             if hasattr(obj, "id") and obj.id is None:

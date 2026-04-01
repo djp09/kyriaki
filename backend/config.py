@@ -30,12 +30,13 @@ class Settings(BaseSettings):
     dossier_model: str = "claude-opus-4-20250514"
     dossier_max_tokens: int = 4096
     dossier_top_n: int = 3
+    dossier_max_concurrent: int = 3
 
     # Matching engine
     match_timeout: int = 180
-    max_concurrent_analyses: int = 5
+    max_concurrent_analyses: int = 10
     inter_call_delay: float = 0.0
-    max_retries: int = 1
+    max_retries: int = 3
     default_page_size: int = 10
 
     # Trials client

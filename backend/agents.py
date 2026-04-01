@@ -98,13 +98,21 @@ class DossierAgent(BaseAgent):
         top_matches = sorted(matches, key=lambda m: m.get("match_score", 0), reverse=True)[:top_n]
         await ctx.emit("progress", {"step": "deep_analysis", "trial_count": len(top_matches)})
 
-        # Parallel analysis — all trials analyzed concurrently (like MatchingAgent)
+        # Parallel analysis with rate-limit-safe concurrency
+        semaphore = asyncio.Semaphore(settings.dossier_max_concurrent)
+
         async def _analyze_one(i: int, match: dict) -> dict:
-            await ctx.emit(
-                "progress",
-                {"step": "analyzing_trial", "trial_index": i + 1, "total": len(top_matches), "nct_id": match["nct_id"]},
-            )
-            return await self._analyze_deep(patient_data, match)
+            async with semaphore:
+                await ctx.emit(
+                    "progress",
+                    {
+                        "step": "analyzing_trial",
+                        "trial_index": i + 1,
+                        "total": len(top_matches),
+                        "nct_id": match["nct_id"],
+                    },
+                )
+                return await self._analyze_deep(patient_data, match)
 
         sections = await asyncio.gather(*[_analyze_one(i, m) for i, m in enumerate(top_matches)])
 

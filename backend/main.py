@@ -257,9 +257,16 @@ async def list_agent_tasks(
     if patient_id:
         tasks = await list_tasks_for_patient(db, _parse_uuid(patient_id))
     else:
-        stmt = select(AgentTaskDB).order_by(AgentTaskDB.created_at.desc()).limit(100)
+        from sqlalchemy.orm import joinedload
+
+        stmt = (
+            select(AgentTaskDB)
+            .options(joinedload(AgentTaskDB.gates))
+            .order_by(AgentTaskDB.created_at.desc())
+            .limit(100)
+        )
         result = await db.execute(stmt)
-        tasks = list(result.scalars().all())
+        tasks = list(result.unique().scalars().all())
     return [_task_to_detail_response(t) for t in tasks]
 
 

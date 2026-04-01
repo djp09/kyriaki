@@ -41,13 +41,21 @@ async def _execute_task(
     """Run an agent, update task status, emit events. Inner logic shared by sync/background dispatch."""
     from agents import AgentContext  # deferred to avoid circular import
 
+    pending_events: list[AgentEventDB] = []
+
     async def emit(event_type: str, data: dict[str, Any] | None = None) -> None:
-        session.add(AgentEventDB(task_id=task.id, event_type=event_type, data=data or {}))
-        await session.flush()
+        pending_events.append(AgentEventDB(task_id=task.id, event_type=event_type, data=data or {}))
+
+    async def flush_events() -> None:
+        if pending_events:
+            session.add_all(pending_events)
+            pending_events.clear()
+            await session.flush()
 
     task.status = TaskStatus.running.value
     task.started_at = datetime.now(timezone.utc)
     await emit("started")
+    await flush_events()
 
     try:
         agent = _registry[agent_type]()
@@ -58,6 +66,7 @@ async def _execute_task(
         task.error = f"{type(e).__name__}: {e}"
         task.completed_at = datetime.now(timezone.utc)
         await emit("failed", {"error": task.error})
+        await flush_events()
         logger.error("task.failed", task_id=str(task.id), agent_type=agent_type, error=task.error)
         return
 
@@ -86,6 +95,8 @@ async def _execute_task(
         task.completed_at = datetime.now(timezone.utc)
         await emit("failed", {"error": result.error})
         logger.error("task.failed", task_id=str(task.id), agent_type=agent_type, error=result.error)
+
+    await flush_events()
 
 
 def _create_task(

@@ -15,7 +15,9 @@ def _build_engine():
     settings = get_settings()
     is_sqlite = settings.database_url.startswith("sqlite")
     kwargs = {}
-    if not is_sqlite:
+    if is_sqlite:
+        kwargs.update(connect_args={"check_same_thread": False})
+    else:
         kwargs.update(pool_size=10, max_overflow=20, pool_timeout=30, pool_recycle=1800)
     return create_async_engine(
         settings.database_url,
