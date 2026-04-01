@@ -1,4 +1,5 @@
 from typing import Dict, List, Optional, Tuple
+import time
 
 import httpx
 import math
@@ -17,6 +18,10 @@ FIELDS = ",".join([
     "StatusModule",
     "ArmsInterventionsModule",
 ])
+
+# Simple in-memory cache: key -> (timestamp, data)
+_search_cache: Dict[str, Tuple[float, List[Dict]]] = {}
+CACHE_TTL = 300  # 5 minutes
 
 # Approximate lat/lon for US ZIP codes (first 3 digits).
 # For a real product, use a geocoding API. This is good enough for the prototype.
@@ -145,6 +150,58 @@ def _parse_age_years(age_str: str) -> Optional[int]:
         return None
 
 
+def _cache_key(cancer_type: str, age: Optional[int], sex: Optional[str], page_size: int) -> str:
+    return f"{cancer_type}|{age}|{sex}|{page_size}"
+
+
+def _get_cached(key: str) -> Optional[List[Dict]]:
+    """Return cached result if within TTL, otherwise None."""
+    if key in _search_cache:
+        ts, data = _search_cache[key]
+        if time.time() - ts < CACHE_TTL:
+            print(f"[TRIALS] Cache hit for: {key}")
+            return data
+        else:
+            del _search_cache[key]
+    return None
+
+
+def _set_cache(key: str, data: List[Dict]) -> None:
+    _search_cache[key] = (time.time(), data)
+
+
+async def _http_get_with_retry(
+    url: str,
+    params: dict,
+    max_retries: int = 3,
+    timeout: float = 30,
+) -> httpx.Response:
+    """GET request with retry on transient network errors."""
+    last_exc: Exception | None = None
+    for attempt in range(max_retries):
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.get(url, params=params)
+                resp.raise_for_status()
+                return resp
+        except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout) as e:
+            last_exc = e
+            wait = 2 ** attempt
+            print(f"[TRIALS] Network error ({type(e).__name__}), retrying in {wait}s (attempt {attempt + 1}/{max_retries})...")
+            import asyncio
+            await asyncio.sleep(wait)
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code in (429, 500, 502, 503, 504):
+                last_exc = e
+                wait = 2 ** attempt
+                print(f"[TRIALS] HTTP {e.response.status_code}, retrying in {wait}s (attempt {attempt + 1}/{max_retries})...")
+                import asyncio
+                await asyncio.sleep(wait)
+            else:
+                raise
+    raise last_exc  # type: ignore[misc]
+
+
 async def search_trials(
     cancer_type: str,
     age: Optional[int] = None,
@@ -152,6 +209,11 @@ async def search_trials(
     page_size: int = 10,
 ) -> List[Dict]:
     """Search ClinicalTrials.gov for recruiting trials matching the cancer type."""
+    cache_k = _cache_key(cancer_type, age, sex, page_size)
+    cached = _get_cached(cache_k)
+    if cached is not None:
+        return cached
+
     params = {
         "query.cond": cancer_type,
         "filter.overallStatus": "RECRUITING",
@@ -159,14 +221,24 @@ async def search_trials(
         "pageSize": min(page_size, 100),
     }
 
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(f"{BASE_URL}/studies", params=params)
-        resp.raise_for_status()
+    resp = await _http_get_with_retry(f"{BASE_URL}/studies", params)
+    try:
         data = resp.json()
+    except Exception as e:
+        print(f"[TRIALS] Failed to parse JSON response: {e}")
+        return []
+
+    if not isinstance(data, dict) or "studies" not in data:
+        print(f"[TRIALS] Unexpected API response structure: {list(data.keys()) if isinstance(data, dict) else type(data)}")
+        return []
 
     studies = []
     for study_raw in data.get("studies", []):
-        study = _extract_study(study_raw)
+        try:
+            study = _extract_study(study_raw)
+        except Exception as e:
+            print(f"[TRIALS] Failed to extract study: {e}")
+            continue
 
         # Pre-filter: age
         if age is not None:
@@ -184,17 +256,23 @@ async def search_trials(
 
         studies.append(study)
 
+    _set_cache(cache_k, studies)
     return studies
 
 
 async def get_trial(nct_id: str) -> Optional[Dict]:
     """Fetch a single trial by NCT ID."""
     params = {"fields": FIELDS}
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(f"{BASE_URL}/studies/{nct_id}", params=params)
-        if resp.status_code == 404:
+    try:
+        resp = await _http_get_with_retry(f"{BASE_URL}/studies/{nct_id}", params)
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code in (400, 404):
             return None
-        resp.raise_for_status()
+        raise
+    try:
         data = resp.json()
+    except Exception as e:
+        print(f"[TRIALS] Failed to parse JSON for {nct_id}: {e}")
+        return None
 
     return _extract_study(data)
