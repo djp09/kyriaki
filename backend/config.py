@@ -26,10 +26,15 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     claude_model: str = "claude-sonnet-4-20250514"
 
+    # Dossier agent
+    dossier_model: str = "claude-opus-4-20250514"
+    dossier_max_tokens: int = 4096
+    dossier_top_n: int = 3
+
     # Matching engine
-    match_timeout: int = 120
-    max_concurrent_analyses: int = 1
-    inter_call_delay: float = 2.0
+    match_timeout: int = 180
+    max_concurrent_analyses: int = 5
+    inter_call_delay: float = 0.0
     max_retries: int = 1
     default_page_size: int = 10
 

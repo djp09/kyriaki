@@ -983,6 +983,211 @@ header h1 {
 }
 
 /* ========================================
+   Dossier View
+   ======================================== */
+
+.dossier-view {
+  max-width: 860px;
+}
+
+.dossier-header {
+  margin-bottom: 2rem;
+}
+
+.dossier-header h2 {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: #16213e;
+  margin-bottom: 0.25rem;
+}
+
+.dossier-subtitle {
+  color: #6b7280;
+  font-size: 0.93rem;
+}
+
+.dossier-timestamp {
+  font-size: 0.8rem;
+  color: #9ca3af;
+}
+
+.dossier-section {
+  background: #fff;
+  border-radius: 14px;
+  padding: 1.75rem;
+  margin-bottom: 1.25rem;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06), 0 4px 16px rgba(0, 0, 0, 0.04);
+}
+
+.dossier-section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+  margin-bottom: 1.25rem;
+}
+
+.dossier-section-header h3 {
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: #16213e;
+  line-height: 1.4;
+  margin-bottom: 0.35rem;
+}
+
+.dossier-error {
+  background: #fef2f2;
+  border-left: 4px solid #dc2626;
+  padding: 1rem;
+  border-radius: 0 8px 8px 0;
+  color: #991b1b;
+  font-size: 0.9rem;
+}
+
+.dossier-section h4 {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: #374151;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  margin-bottom: 0.6rem;
+  margin-top: 1.25rem;
+}
+
+.dossier-section h4:first-child {
+  margin-top: 0;
+}
+
+.dossier-justification p,
+.dossier-patient-summary p,
+.dossier-clinical p {
+  font-size: 0.92rem;
+  color: #4b5563;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.dossier-patient-summary {
+  background: #f0f9ff;
+  border-radius: 10px;
+  padding: 1rem 1.25rem;
+  margin-top: 1rem;
+}
+
+.dossier-patient-summary h4 {
+  color: #0369a1;
+  margin-top: 0;
+}
+
+.criteria-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.criterion-row {
+  display: flex;
+  gap: 0.75rem;
+  padding: 0.65rem 0;
+  border-bottom: 1px solid #f3f4f6;
+}
+
+.criterion-row:last-child {
+  border-bottom: none;
+}
+
+.criterion-status {
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.78rem;
+  font-weight: 700;
+  margin-top: 0.1rem;
+}
+
+.criterion-status.status-met { background: #d1fae5; color: #059669; }
+.criterion-status.status-not-met { background: #fee2e2; color: #dc2626; }
+.criterion-status.status-unknown { background: #fef3c7; color: #d97706; }
+.criterion-status.status-verify { background: #dbeafe; color: #2563eb; }
+
+.criterion-detail {
+  flex: 1;
+  min-width: 0;
+}
+
+.criterion-text {
+  font-size: 0.9rem;
+  color: #1a1a2e;
+  line-height: 1.45;
+}
+
+.criterion-type-tag {
+  display: inline-block;
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  padding: 0.1rem 0.4rem;
+  border-radius: 3px;
+  margin-right: 0.4rem;
+  background: #f3f4f6;
+  color: #6b7280;
+  vertical-align: middle;
+}
+
+.criterion-evidence {
+  font-size: 0.82rem;
+  color: #059669;
+  margin-top: 0.2rem;
+  font-style: italic;
+}
+
+.criterion-notes {
+  font-size: 0.82rem;
+  color: #6b7280;
+  margin-top: 0.15rem;
+}
+
+.dossier-next-steps ol {
+  padding-left: 1.5rem;
+  font-size: 0.9rem;
+  color: #4b5563;
+  line-height: 1.7;
+}
+
+.dossier-flags {
+  background: #fffbeb;
+  border-radius: 10px;
+  padding: 1rem 1.25rem;
+  margin-top: 1rem;
+}
+
+.dossier-flags h4 {
+  color: #92400e;
+  margin-top: 0;
+}
+
+.dossier-flags ul {
+  padding-left: 1.25rem;
+  font-size: 0.9rem;
+  color: #78350f;
+  line-height: 1.7;
+}
+
+.dossier-footer {
+  margin-top: 2rem;
+  text-align: center;
+}
+
+@media (max-width: 600px) {
+  .dossier-section { padding: 1.15rem; }
+  .dossier-section-header { flex-direction: column-reverse; gap: 0.5rem; }
+}
+
+/* ========================================
    Reduced Motion
    ======================================== */
 

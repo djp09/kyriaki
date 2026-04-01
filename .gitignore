@@ -5,6 +5,7 @@ backend/.env
 # python
 __pycache__/
 *.pyc
+*.db
 
 # node
 node_modules/

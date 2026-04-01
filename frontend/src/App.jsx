@@ -2,7 +2,8 @@ import { useState, useEffect, useCallback } from "react";
 import IntakeForm from "./components/IntakeForm";
 import TrialResults from "./components/TrialResults";
 import TrialDetail from "./components/TrialDetail";
-import { matchTrials } from "./api";
+import DossierView from "./components/DossierView";
+import { agentMatch, agentDossier } from "./api";
 
 const LOADING_MESSAGES = [
   "Searching ClinicalTrials.gov for recruiting studies...",
@@ -15,11 +16,13 @@ const LOADING_MESSAGES = [
 ];
 
 export default function App() {
-  const [view, setView] = useState("intake"); // intake | loading | results | detail
+  const [view, setView] = useState("intake"); // intake | loading | results | detail | dossier
   const [results, setResults] = useState(null);
   const [selectedTrial, setSelectedTrial] = useState(null);
   const [error, setError] = useState(null);
   const [loadingMsgIndex, setLoadingMsgIndex] = useState(0);
+  const [dossierStatus, setDossierStatus] = useState(null); // null | "loading" | "done" | "error"
+  const [dossierData, setDossierData] = useState(null);
 
   useEffect(() => {
     if (view !== "loading") return;
@@ -35,14 +38,33 @@ export default function App() {
   const handleSubmit = async (patient) => {
     setView("loading");
     setError(null);
+    setDossierStatus(null);
+    setDossierData(null);
     try {
-      const data = await matchTrials(patient);
+      const data = await agentMatch(patient);
       setResults(data);
       setView("results");
     } catch (err) {
       setError(err.message);
       setView("intake");
     }
+  };
+
+  const handleDossier = async () => {
+    if (!results?.task_id) return;
+    setDossierStatus("loading");
+    try {
+      const task = await agentDossier(results.task_id, 3);
+      setDossierData(task.output_data?.dossier || null);
+      setDossierStatus("done");
+    } catch (err) {
+      setDossierStatus("error");
+      setError("Dossier generation failed: " + err.message);
+    }
+  };
+
+  const handleViewDossier = () => {
+    if (dossierData) setView("dossier");
   };
 
   const handleRetry = useCallback(() => {
@@ -63,6 +85,8 @@ export default function App() {
     setResults(null);
     setSelectedTrial(null);
     setError(null);
+    setDossierStatus(null);
+    setDossierData(null);
     setView("intake");
   };
 
@@ -108,16 +132,27 @@ export default function App() {
                 width: `${((loadingMsgIndex + 1) / LOADING_MESSAGES.length) * 100}%`
               }} />
             </div>
-            <p className="loading-patience">This typically takes 30-60 seconds</p>
+            <p className="loading-patience">This typically takes 15-30 seconds</p>
           </div>
         )}
 
         {view === "results" && results && (
-          <TrialResults data={results} onSelect={handleSelectTrial} onBack={handleStartOver} />
+          <TrialResults
+            data={results}
+            onSelect={handleSelectTrial}
+            onBack={handleStartOver}
+            onDossier={handleDossier}
+            onViewDossier={handleViewDossier}
+            dossierStatus={dossierStatus}
+          />
         )}
 
         {view === "detail" && selectedTrial && (
           <TrialDetail trial={selectedTrial} onBack={handleBackToResults} />
+        )}
+
+        {view === "dossier" && dossierData && (
+          <DossierView dossier={dossierData} onBack={handleBackToResults} />
         )}
       </div>
     </div>

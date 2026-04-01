@@ -396,5 +396,10 @@ class TestEndpoints:
         but that requires a network call. We just test the route exists."""
         # This will attempt a real network call; we just check we get a response
         # (might be 404, might be a network error depending on environment)
-        resp = client.get("/api/trials/NCT_DOES_NOT_EXIST_99999")
+        resp = client.get("/api/trials/NCT99999999")
         assert resp.status_code in (404, 500, 502, 503, 403)
+
+    def test_trial_detail_invalid_nct_id(self, client):
+        """Invalid NCT ID format should return 400."""
+        resp = client.get("/api/trials/NOT_VALID")
+        assert resp.status_code == 400

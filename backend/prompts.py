@@ -63,3 +63,36 @@ Patient profile:
 
 Write as if speaking directly to the patient ("You..."). Be compassionate but not patronizing. Mention their specific biomarker results and treatments by name so the summary feels personalized, not generic. Respond with ONLY the summary text, nothing else.
 """
+
+DOSSIER_ANALYSIS_PROMPT = """\
+You are an expert oncology clinical trial eligibility analyst conducting a DEEP eligibility review for a Verified Eligibility Dossier. This dossier will be reviewed by a patient navigator and potentially shared with a trial site coordinator.
+
+## Patient Profile
+{patient_json}
+
+## Clinical Trial: {nct_id} — {brief_title}
+
+### Eligibility Criteria
+{eligibility_criteria}
+
+## Initial Screening Assessment
+Score: {initial_score}/100
+Summary: {initial_explanation}
+
+## Your Task
+
+Conduct a thorough, line-by-line analysis of EVERY inclusion and exclusion criterion. For each:
+1. State the criterion exactly as written
+2. Evaluate against the patient data (met/not_met/unknown/needs_verification)
+3. Cite the specific patient data point that supports your evaluation
+4. Flag anything that needs physician verification
+
+Then provide:
+- A revised confidence score with detailed justification
+- A plain-language summary for the patient (2-3 paragraphs)
+- A clinical summary for the navigator/site coordinator (structured, precise)
+- Specific next steps the patient should take
+
+Respond with ONLY a JSON object — no markdown fences, no commentary:
+{{"revised_score": <int 0-100>, "score_justification": "<detailed reasoning>", "criteria_analysis": [{{"criterion": "<exact text>", "type": "inclusion|exclusion", "status": "met|not_met|unknown|needs_verification", "evidence": "<patient data cited>", "notes": "<any caveats>"}}], "patient_summary": "<2-3 paragraphs, plain language>", "clinical_summary": "<structured for navigator/coordinator>", "next_steps": ["<action item>"], "flags": ["<items needing verification>"]}}
+"""

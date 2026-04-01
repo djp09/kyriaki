@@ -55,3 +55,43 @@ export async function matchTrials(patient, maxResults = 10) {
 export async function getTrialDetail(nctId) {
   return request(`${BASE}/trials/${nctId}`);
 }
+
+// --- Agent endpoints ---
+
+export async function agentMatch(patient, maxResults = 10) {
+  const task = await request(`${BASE}/agents/match`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ patient, max_results: maxResults }),
+  });
+  // Convert agent task response to the same shape as /api/match
+  return {
+    patient_summary: task.output_data?.patient_summary || "",
+    matches: task.output_data?.matches || [],
+    total_trials_screened: task.output_data?.total_trials_screened || 0,
+    task_id: task.task_id,
+    disclaimer:
+      "These results are for informational purposes only and do not constitute medical advice. " +
+      "Please discuss all findings with your oncologist before making any treatment decisions.",
+  };
+}
+
+export async function agentDossier(matchingTaskId, topN = 3) {
+  return request(`${BASE}/agents/dossier`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ matching_task_id: matchingTaskId, top_n: topN }),
+  });
+}
+
+export async function getTask(taskId) {
+  return request(`${BASE}/agents/tasks/${taskId}`);
+}
+
+export async function resolveGate(gateId, status, resolvedBy, notes = null) {
+  return request(`${BASE}/agents/gates/${gateId}/resolve`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ status, resolved_by: resolvedBy, notes }),
+  });
+}

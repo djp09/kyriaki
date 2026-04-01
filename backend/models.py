@@ -4,8 +4,8 @@ from pydantic import BaseModel, Field
 
 
 class PatientProfile(BaseModel):
-    cancer_type: str = Field(..., examples=["Non-Small Cell Lung Cancer"])
-    cancer_stage: str = Field(..., examples=["Stage IV"])
+    cancer_type: str = Field(..., max_length=256, examples=["Non-Small Cell Lung Cancer"])
+    cancer_stage: str = Field(..., max_length=64, examples=["Stage IV"])
     biomarkers: list[str] = Field(default_factory=list, examples=[["EGFR+", "PD-L1 80%", "ALK-"]])
     prior_treatments: list[str] = Field(default_factory=list, examples=[["Carboplatin/Pemetrexed", "Pembrolizumab"]])
     lines_of_therapy: int = Field(default=0, ge=0)
@@ -16,7 +16,7 @@ class PatientProfile(BaseModel):
     location_zip: str = Field(..., min_length=5, max_length=10)
     willing_to_travel_miles: int = Field(default=50, ge=0)
     additional_conditions: list[str] = Field(default_factory=list)
-    additional_notes: str | None = None
+    additional_notes: str | None = Field(default=None, max_length=5000)
 
 
 class CriterionEvaluation(BaseModel):
@@ -56,3 +56,28 @@ class MatchResponse(BaseModel):
         "These results are for informational purposes only and do not constitute medical advice. "
         "Please discuss all findings with your oncologist before making any treatment decisions."
     )
+
+
+# --- Agent orchestration models ---
+
+
+class TaskResponse(BaseModel):
+    task_id: str
+    agent_type: str
+    status: str
+    output_data: dict | None = None
+    error: str | None = None
+    created_at: str
+    started_at: str | None = None
+    completed_at: str | None = None
+
+
+class DossierRequest(BaseModel):
+    matching_task_id: str
+    top_n: int = Field(default=3, ge=1, le=10)
+
+
+class GateResolution(BaseModel):
+    status: str = Field(..., pattern="^(approved|rejected)$")
+    resolved_by: str = Field(..., min_length=1)
+    notes: str | None = None

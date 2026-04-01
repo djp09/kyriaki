@@ -10,7 +10,7 @@ function scoreLabel(score) {
   return "Low match";
 }
 
-export default function TrialResults({ data, onSelect, onBack }) {
+export default function TrialResults({ data, onSelect, onBack, onDossier, onViewDossier, dossierStatus }) {
   return (
     <div className="results fade-in">
       <div className="results-header">
@@ -86,6 +86,22 @@ export default function TrialResults({ data, onSelect, onBack }) {
           ))}
 
           <div className="results-footer">
+            {data.task_id && onDossier && dossierStatus !== "done" && (
+              <button
+                className="btn btn-primary"
+                onClick={onDossier}
+                disabled={dossierStatus === "loading"}
+              >
+                {dossierStatus === "loading"
+                  ? "Generating deep analysis..."
+                  : "Generate Eligibility Dossier"}
+              </button>
+            )}
+            {dossierStatus === "done" && onViewDossier && (
+              <button className="btn btn-primary" onClick={onViewDossier}>
+                View Eligibility Dossier
+              </button>
+            )}
             <button className="btn btn-secondary" onClick={onBack}>Start New Search</button>
           </div>
         </>

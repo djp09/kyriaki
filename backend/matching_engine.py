@@ -55,7 +55,15 @@ async def _call_claude_with_retry(
 
 
 _last_call_time: float = 0.0
-_call_lock = asyncio.Lock()
+_call_lock: asyncio.Lock | None = None
+
+
+def _get_call_lock() -> asyncio.Lock:
+    """Lazily create the lock on the running event loop (Python 3.9 compat)."""
+    global _call_lock
+    if _call_lock is None:
+        _call_lock = asyncio.Lock()
+    return _call_lock
 
 
 async def _paced_claude_call(
@@ -67,14 +75,16 @@ async def _paced_claude_call(
 ) -> anthropic.types.Message:
     global _last_call_time
     settings = get_settings()
-    async with _call_lock:
-        now = time.monotonic()
-        elapsed = now - _last_call_time
-        if elapsed < settings.inter_call_delay:
-            await asyncio.sleep(settings.inter_call_delay - elapsed)
-        result = await _call_claude_with_retry(client, model=model, max_tokens=max_tokens, messages=messages)
-        _last_call_time = time.monotonic()
-        return result
+    if settings.inter_call_delay > 0:
+        async with _get_call_lock():
+            now = time.monotonic()
+            elapsed = now - _last_call_time
+            if elapsed < settings.inter_call_delay:
+                await asyncio.sleep(settings.inter_call_delay - elapsed)
+            result = await _call_claude_with_retry(client, model=model, max_tokens=max_tokens, messages=messages)
+            _last_call_time = time.monotonic()
+            return result
+    return await _call_claude_with_retry(client, model=model, max_tokens=max_tokens, messages=messages)
 
 
 def _parse_json_response(text: str) -> dict | None:
@@ -301,10 +311,13 @@ def _build_unscored_match(trial: dict, patient: PatientProfile) -> TrialMatch:
 async def match_trials(patient: PatientProfile, max_results: int = 10) -> dict:
     settings = get_settings()
 
+    # Fetch more candidates than requested to allow for filtering, but cap to page_size
+    candidate_count = min(max(max_results * 2, 6), settings.default_page_size)
     trials = await search_trials(
         cancer_type=patient.cancer_type,
         age=patient.age,
         sex=patient.sex,
+        page_size=candidate_count,
     )
 
     total = len(trials)
