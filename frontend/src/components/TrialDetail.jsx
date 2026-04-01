@@ -15,37 +15,57 @@ function statusLabel(status) {
   return labels[status] || status;
 }
 
+function statusIcon(status) {
+  if (status === "met" || status === "not_triggered") return "\u2713";
+  if (status === "not_met" || status === "triggered") return "\u2717";
+  return "?";
+}
+
 export default function TrialDetail({ trial, onBack }) {
   return (
-    <div className="trial-detail">
-      <span className="back-link" onClick={onBack}>&larr; Back to results</span>
+    <div className="trial-detail fade-in">
+      <button
+        className="back-link"
+        onClick={onBack}
+        type="button"
+        aria-label="Back to results"
+      >
+        <svg viewBox="0 0 20 20" fill="currentColor" width="16" height="16" aria-hidden="true">
+          <path fillRule="evenodd" d="M12.79 5.23a.75.75 0 01-.02 1.06L8.832 10l3.938 3.71a.75.75 0 11-1.04 1.08l-4.5-4.25a.75.75 0 010-1.08l4.5-4.25a.75.75 0 011.06.02z" clipRule="evenodd" />
+        </svg>
+        Back to results
+      </button>
 
       <h2>{trial.brief_title}</h2>
-      <div className="trial-meta" style={{ marginBottom: "1rem" }}>
-        <span>{trial.nct_id}</span>
-        <span>{trial.phase}</span>
-        <span>{trial.overall_status}</span>
+      <div className="trial-meta detail-meta">
+        <span className="meta-tag">{trial.nct_id}</span>
+        <span className="meta-tag">{trial.phase}</span>
+        <span className="meta-tag">{trial.overall_status}</span>
         {trial.nearest_site && (
-          <span>{trial.nearest_site.facility} &mdash; {trial.nearest_site.city}, {trial.nearest_site.state}</span>
+          <span className="meta-tag">{trial.nearest_site.facility} -- {trial.nearest_site.city}, {trial.nearest_site.state}</span>
         )}
-        {trial.distance_miles != null && <span>{trial.distance_miles} mi away</span>}
+        {trial.distance_miles != null && <span className="meta-tag">{trial.distance_miles} mi away</span>}
       </div>
 
-      <div className="patient-summary" style={{ background: "#e8f5e9" }}>
-        <strong>Match Score: {trial.match_score}%</strong> &mdash; {trial.match_explanation}
+      <div className="match-score-banner">
+        <div className="match-score-number">
+          <span className="match-score-value">{trial.match_score}%</span>
+          <span className="match-score-label">Match Score</span>
+        </div>
+        <p className="match-score-explanation">{trial.match_explanation}</p>
       </div>
 
       <div className="detail-section">
         <h3>About This Trial</h3>
-        <p style={{ fontSize: "0.93rem", color: "#444" }}>{trial.brief_summary}</p>
+        <p className="detail-body">{trial.brief_summary}</p>
       </div>
 
       {trial.interventions.length > 0 && (
         <div className="detail-section">
           <h3>Treatments Involved</h3>
-          <ul style={{ marginLeft: "1.25rem" }}>
+          <ul className="intervention-list">
             {trial.interventions.map((int, i) => (
-              <li key={i} style={{ fontSize: "0.9rem", marginBottom: "0.25rem" }}>{int}</li>
+              <li key={i}>{int}</li>
             ))}
           </ul>
         </div>
@@ -56,10 +76,14 @@ export default function TrialDetail({ trial, onBack }) {
           <h3>Inclusion Criteria</h3>
           <ul className="criteria-list">
             {trial.inclusion_evaluations.map((ev, i) => (
-              <li key={i}>
-                <span className={statusClass(ev.status)}>[{statusLabel(ev.status)}]</span>{" "}
-                {ev.criterion}
-                <div style={{ fontSize: "0.85rem", color: "#666", marginTop: "0.15rem" }}>{ev.explanation}</div>
+              <li key={i} className="criteria-item">
+                <span className={`criteria-status ${statusClass(ev.status)}`} aria-label={statusLabel(ev.status)}>
+                  {statusIcon(ev.status)}
+                </span>
+                <div className="criteria-content">
+                  <div className="criteria-criterion">{ev.criterion}</div>
+                  <div className="criteria-explanation">{ev.explanation}</div>
+                </div>
               </li>
             ))}
           </ul>
@@ -71,10 +95,14 @@ export default function TrialDetail({ trial, onBack }) {
           <h3>Exclusion Criteria</h3>
           <ul className="criteria-list">
             {trial.exclusion_evaluations.map((ev, i) => (
-              <li key={i}>
-                <span className={statusClass(ev.status)}>[{statusLabel(ev.status)}]</span>{" "}
-                {ev.criterion}
-                <div style={{ fontSize: "0.85rem", color: "#666", marginTop: "0.15rem" }}>{ev.explanation}</div>
+              <li key={i} className="criteria-item">
+                <span className={`criteria-status ${statusClass(ev.status)}`} aria-label={statusLabel(ev.status)}>
+                  {statusIcon(ev.status)}
+                </span>
+                <div className="criteria-content">
+                  <div className="criteria-criterion">{ev.criterion}</div>
+                  <div className="criteria-explanation">{ev.explanation}</div>
+                </div>
               </li>
             ))}
           </ul>
@@ -84,7 +112,7 @@ export default function TrialDetail({ trial, onBack }) {
       {trial.flags_for_oncologist.length > 0 && (
         <div className="detail-section">
           <div className="flags">
-            <h3 style={{ marginBottom: "0.5rem" }}>Discuss With Your Oncologist</h3>
+            <h3>Discuss With Your Oncologist</h3>
             <ul>
               {trial.flags_for_oncologist.map((flag, i) => (
                 <li key={i}>{flag}</li>
@@ -94,16 +122,21 @@ export default function TrialDetail({ trial, onBack }) {
         </div>
       )}
 
-      <div className="detail-section" style={{ textAlign: "center" }}>
+      <div className="detail-actions">
         <a
           href={`https://clinicaltrials.gov/study/${trial.nct_id}`}
           target="_blank"
           rel="noopener noreferrer"
           className="btn btn-primary"
-          style={{ display: "inline-block", textDecoration: "none" }}
         >
           View on ClinicalTrials.gov
+          <svg viewBox="0 0 20 20" fill="currentColor" width="14" height="14" aria-hidden="true" style={{ marginLeft: "0.4rem" }}>
+            <path fillRule="evenodd" d="M4.25 5.5a.75.75 0 00-.75.75v8.5c0 .414.336.75.75.75h8.5a.75.75 0 00.75-.75v-4a.75.75 0 011.5 0v4A2.25 2.25 0 0112.75 17h-8.5A2.25 2.25 0 012 14.75v-8.5A2.25 2.25 0 014.25 4h5a.75.75 0 010 1.5h-5zm7.5-2.25a.75.75 0 01.75-.75h4.5a.75.75 0 01.75.75v4.5a.75.75 0 01-1.5 0V5.56l-5.22 5.22a.75.75 0 11-1.06-1.06l5.22-5.22h-2.69a.75.75 0 01-.75-.75z" clipRule="evenodd" />
+          </svg>
         </a>
+        <button className="btn btn-secondary" onClick={onBack} type="button">
+          Back to results
+        </button>
       </div>
     </div>
   );
