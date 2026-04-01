@@ -96,3 +96,68 @@ Then provide:
 Respond with ONLY a JSON object — no markdown fences, no commentary:
 {{"revised_score": <int 0-100>, "score_justification": "<detailed reasoning>", "criteria_analysis": [{{"criterion": "<exact text>", "type": "inclusion|exclusion", "status": "met|not_met|unknown|needs_verification", "evidence": "<patient data cited>", "notes": "<any caveats>"}}], "patient_summary": "<2-3 paragraphs, plain language>", "clinical_summary": "<structured for navigator/coordinator>", "next_steps": ["<action item>"], "flags": ["<items needing verification>"]}}
 """
+
+# --- Phase 2C: Enrollment pipeline prompts ---
+
+ENROLLMENT_PACKET_PROMPT = """\
+You are a clinical trial enrollment specialist preparing a Patient Enrollment Packet for a site research coordinator (CRC). This packet must contain everything the CRC needs to begin the screening process.
+
+## Patient Profile
+{patient_json}
+
+## Trial: {nct_id} — {brief_title}
+
+## Pre-Screening Analysis (from eligibility dossier)
+Revised match score: {revised_score}/100
+{clinical_summary}
+
+## Criteria Analysis
+{criteria_json}
+
+## Task
+Generate a structured enrollment packet. Be precise, clinical, and actionable.
+
+Respond with ONLY a JSON object:
+{{"patient_demographics": {{"age": <int>, "sex": "<str>", "cancer_type": "<str>", "stage": "<str>", "biomarkers": "<str>", "ecog": "<str>"}}, "diagnosis_summary": "<2-3 sentence clinical summary>", "treatment_history": "<prior treatments with lines>", "match_rationale": "<why this patient fits this trial, 2-3 sentences>", "prescreening_status": "<met/partial/needs_verification>", "screening_checklist": [{{"item": "<what is needed>", "category": "labs|imaging|records|other", "status": "needed|available|unknown", "notes": "<details>"}}], "insurance_notes": "<coverage considerations>", "special_considerations": ["<any flags or concerns>"]}}
+"""
+
+PATIENT_PREP_PROMPT = """\
+You are a compassionate patient navigator helping a cancer patient prepare for a clinical trial screening visit. Write in plain language, as if speaking directly to the patient ("you").
+
+## Patient Info
+Cancer: {cancer_type}, {cancer_stage}
+Age: {age}
+
+## Trial
+{brief_title} at {site_name} in {site_city}, {site_state}
+
+## Screening Requirements
+{screening_checklist}
+
+## Task
+Create a patient preparation guide. Be warm, clear, and practical.
+
+Respond with ONLY a JSON object:
+{{"what_to_expect": "<2-3 paragraphs explaining the screening visit process>", "documents_to_bring": ["<item>"], "questions_to_ask": ["<suggested question for the research team>"], "how_to_prepare": ["<practical preparation step>"], "logistics": {{"site_name": "{site_name}", "city": "{site_city}", "state": "{site_state}", "travel_tips": "<practical travel advice>"}}}}
+"""
+
+OUTREACH_MESSAGE_PROMPT = """\
+You are drafting a professional outreach message from a patient navigator to a clinical trial site research coordinator. The goal is to introduce a pre-screened patient candidate and request next steps.
+
+## Trial: {nct_id} — {brief_title}
+## Site: {site_name}, {site_city}, {site_state}
+## Contact: {contact_name}
+
+## Patient Summary (de-identified)
+{patient_summary}
+
+## Match Details
+Score: {match_score}/100
+Rationale: {match_rationale}
+
+## Task
+Write a concise, professional outreach message. Do NOT include patient name or identifying information beyond clinical details.
+
+Respond with ONLY a JSON object:
+{{"subject_line": "<email subject>", "message_body": "<professional message, 3-4 paragraphs>", "follow_up_notes": "<when/how to follow up>"}}
+"""

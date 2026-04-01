@@ -176,3 +176,17 @@ class HumanGateDB(Base):
         Index("ix_gate_task_id", "task_id"),
         Index("ix_gate_status", "status"),
     )
+
+
+class TrialWatchDB(Base):
+    __tablename__ = "trial_watches"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    patient_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("patient_profiles.id"), nullable=False)
+    nct_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    last_status: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    last_site_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_checked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    __table_args__ = (Index("ix_watch_patient_id", "patient_id"),)

@@ -37,11 +37,14 @@ from middleware import RequestLoggingMiddleware
 from models import (
     ActivityItem,
     DossierRequest,
+    EnrollmentRequest,
     EventResponse,
     GateResolution,
     GateResponse,
     MatchRequest,
     MatchResponse,
+    MonitorRequest,
+    OutreachRequest,
     PatientProfile,
     TaskDetailResponse,
     TaskResponse,
@@ -51,6 +54,50 @@ from trials_client import get_trial
 settings = get_settings()
 setup_logging(log_level=settings.log_level, log_format=settings.log_format)
 logger = get_logger("kyriaki.main")
+
+
+async def _monitor_loop() -> None:
+    """Background loop: periodically dispatches MonitorAgent for all tracked patients."""
+    while True:
+        await asyncio.sleep(settings.monitor_interval_seconds)
+        try:
+            async with async_session() as session:
+                # Find all patients with completed matching tasks
+                stmt = (
+                    select(AgentTaskDB.patient_id)
+                    .where(AgentTaskDB.agent_type == "matching", AgentTaskDB.status == "completed")
+                    .distinct()
+                )
+                result = await session.execute(stmt)
+                patient_ids = [row[0] for row in result.all()]
+
+                for pid in patient_ids:
+                    # Gather watched trials from completed matching tasks
+                    task_stmt = (
+                        select(AgentTaskDB)
+                        .where(
+                            AgentTaskDB.patient_id == pid,
+                            AgentTaskDB.agent_type == "matching",
+                            AgentTaskDB.status == "completed",
+                        )
+                        .order_by(AgentTaskDB.created_at.desc())
+                        .limit(1)
+                    )
+                    task_result = await session.execute(task_stmt)
+                    task = task_result.scalars().first()
+                    if not task or not task.output_data:
+                        continue
+
+                    watches = [
+                        {"nct_id": m["nct_id"], "last_status": m.get("overall_status", ""), "last_site_count": 0}
+                        for m in task.output_data.get("matches", [])
+                    ]
+                    if watches:
+                        await dispatch_background(session, "monitor", pid, input_data={"watches": watches})
+                await session.commit()
+            logger.info("monitor.loop_complete", patients_checked=len(patient_ids))
+        except Exception as e:
+            logger.error("monitor.loop_error", error=f"{type(e).__name__}: {e}")
 
 
 @asynccontextmanager
@@ -63,7 +110,16 @@ async def lifespan(app: FastAPI):
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
         logger.info("db.auto_created_tables", backend="sqlite")
+
+    monitor_task = None
+    if settings.monitor_enabled:
+        monitor_task = asyncio.create_task(_monitor_loop())
+        logger.info("monitor.started", interval=settings.monitor_interval_seconds)
+
     yield
+
+    if monitor_task:
+        monitor_task.cancel()
 
 
 app = FastAPI(title="Kyriaki", description="Clinical trial matching engine for cancer patients", lifespan=lifespan)
@@ -338,6 +394,82 @@ async def stream_task_events(task_id: str):
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
+@app.post("/api/agents/enrollment", response_model=TaskResponse)
+async def agent_enrollment(request: EnrollmentRequest, db: AsyncSession = Depends(get_db)):
+    dossier_task = await db.get(AgentTaskDB, _parse_uuid(request.dossier_task_id))
+    if not dossier_task or dossier_task.status != "completed":
+        raise HTTPException(404, "Dossier task not found or not completed")
+
+    task = await dispatch_background(
+        db,
+        "enrollment",
+        dossier_task.patient_id,
+        input_data={
+            "patient": dossier_task.input_data.get("patient", {}),
+            "dossier": dossier_task.output_data.get("dossier", {}),
+            "trial_nct_id": request.trial_nct_id,
+        },
+        parent_task_id=dossier_task.id,
+    )
+    return _task_to_response(task)
+
+
+@app.post("/api/agents/outreach", response_model=TaskResponse)
+async def agent_outreach(request: OutreachRequest, db: AsyncSession = Depends(get_db)):
+    enrollment_task = await db.get(AgentTaskDB, _parse_uuid(request.enrollment_task_id))
+    if not enrollment_task or enrollment_task.status != "completed":
+        raise HTTPException(404, "Enrollment task not found or not completed")
+
+    task = await dispatch_background(
+        db,
+        "outreach",
+        enrollment_task.patient_id,
+        input_data={
+            **enrollment_task.output_data,
+            "patient": enrollment_task.input_data.get("patient", {}),
+        },
+        parent_task_id=enrollment_task.id,
+    )
+    return _task_to_response(task)
+
+
+@app.post("/api/agents/monitor", response_model=TaskResponse)
+async def agent_monitor(request: MonitorRequest, db: AsyncSession = Depends(get_db)):
+    patient_id = _parse_uuid(request.patient_id)
+
+    # Build watch list from latest matching task
+    stmt = (
+        select(AgentTaskDB)
+        .where(
+            AgentTaskDB.patient_id == patient_id,
+            AgentTaskDB.agent_type == "matching",
+            AgentTaskDB.status == "completed",
+        )
+        .order_by(AgentTaskDB.created_at.desc())
+        .limit(1)
+    )
+    result = await db.execute(stmt)
+    match_task = result.scalars().first()
+    if not match_task or not match_task.output_data:
+        raise HTTPException(404, "No completed matching task found for this patient")
+
+    watches = [
+        {"nct_id": m["nct_id"], "last_status": m.get("overall_status", ""), "last_site_count": 0}
+        for m in match_task.output_data.get("matches", [])
+    ]
+
+    task = await dispatch_background(db, "monitor", patient_id, input_data={"watches": watches})
+    return _task_to_response(task)
+
+
+@app.get("/api/agents/monitor/status")
+async def monitor_status():
+    return {
+        "enabled": settings.monitor_enabled,
+        "interval_seconds": settings.monitor_interval_seconds,
+    }
+
+
 @app.post("/api/agents/gates/{gate_id}/resolve")
 async def resolve_gate(gate_id: str, resolution: GateResolution, db: AsyncSession = Depends(get_db)):
     gate = await db.get(HumanGateDB, _parse_uuid(gate_id))
@@ -346,13 +478,37 @@ async def resolve_gate(gate_id: str, resolution: GateResolution, db: AsyncSessio
 
     gate.status = resolution.status
     gate.resolved_by = resolution.resolved_by
-    gate.resolution_data = {"notes": resolution.notes} if resolution.notes else {}
+    gate.resolution_data = {"notes": resolution.notes, "chain_to_trial": resolution.chain_to_trial}
     gate.resolved_at = datetime.now(timezone.utc)
 
     task = await db.get(AgentTaskDB, gate.task_id)
     if resolution.status == "approved":
         task.status = "completed"
         task.completed_at = datetime.now(timezone.utc)
+
+        # Auto-chain: dossier approved → enrollment
+        if gate.gate_type == "dossier_review" and resolution.chain_to_trial:
+            await dispatch_background(
+                db,
+                "enrollment",
+                task.patient_id,
+                input_data={
+                    "patient": task.input_data.get("patient", {}),
+                    "dossier": task.output_data.get("dossier", {}),
+                    "trial_nct_id": resolution.chain_to_trial,
+                },
+                parent_task_id=task.id,
+            )
+
+        # Auto-chain: enrollment approved → outreach
+        elif gate.gate_type == "enrollment_review":
+            await dispatch_background(
+                db,
+                "outreach",
+                task.patient_id,
+                input_data={**task.output_data, "patient": task.input_data.get("patient", {})},
+                parent_task_id=task.id,
+            )
     else:
         task.status = "failed"
         task.error = f"Gate rejected by {resolution.resolved_by}"

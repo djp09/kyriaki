@@ -39,6 +39,10 @@ class Settings(BaseSettings):
     max_retries: int = 3
     default_page_size: int = 10
 
+    # Monitor agent
+    monitor_enabled: bool = False
+    monitor_interval_seconds: int = 3600
+
     # Trials client
     cache_ttl: int = 300
 

@@ -81,6 +81,20 @@ class GateResolution(BaseModel):
     status: str = Field(..., pattern="^(approved|rejected)$")
     resolved_by: str = Field(..., min_length=1)
     notes: str | None = None
+    chain_to_trial: str | None = None  # NCT ID to auto-chain enrollment after dossier approval
+
+
+class EnrollmentRequest(BaseModel):
+    dossier_task_id: str
+    trial_nct_id: str
+
+
+class OutreachRequest(BaseModel):
+    enrollment_task_id: str
+
+
+class MonitorRequest(BaseModel):
+    patient_id: str
 
 
 class GateResponse(BaseModel):
