@@ -6,7 +6,7 @@ from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import joinedload, selectinload
 
 from db_models import AgentEventDB, AgentTaskDB, HumanGateDB, MatchResultDB, MatchSessionDB, PatientProfileDB
 
@@ -70,9 +70,9 @@ async def get_match_results(session: AsyncSession, session_id: UUID) -> list[Mat
 
 async def get_task_with_gates(session: AsyncSession, task_id: UUID) -> AgentTaskDB | None:
     """Load a task with its gates eagerly loaded."""
-    stmt = select(AgentTaskDB).where(AgentTaskDB.id == task_id).options(selectinload(AgentTaskDB.gates))
+    stmt = select(AgentTaskDB).where(AgentTaskDB.id == task_id).options(joinedload(AgentTaskDB.gates))
     result = await session.execute(stmt)
-    return result.scalars().first()
+    return result.unique().scalars().first()
 
 
 async def list_tasks_for_patient(session: AsyncSession, patient_id: UUID) -> list[AgentTaskDB]:
@@ -80,11 +80,11 @@ async def list_tasks_for_patient(session: AsyncSession, patient_id: UUID) -> lis
     stmt = (
         select(AgentTaskDB)
         .where(AgentTaskDB.patient_id == patient_id)
-        .options(selectinload(AgentTaskDB.gates))
+        .options(joinedload(AgentTaskDB.gates))
         .order_by(AgentTaskDB.created_at.desc())
     )
     result = await session.execute(stmt)
-    return list(result.scalars().all())
+    return list(result.unique().scalars().all())
 
 
 async def list_events_for_task(session: AsyncSession, task_id: UUID) -> list[AgentEventDB]:
@@ -104,37 +104,25 @@ async def list_gates(session: AsyncSession, status: str = "pending") -> list[Hum
 async def get_patient_activity(session: AsyncSession, patient_id: UUID) -> list[dict]:
     """Combined timeline of tasks, events, and gates for a patient. Newest first."""
     tasks = await list_tasks_for_patient(session, patient_id)
-    items: list[dict] = []
+    task_ids = [t.id for t in tasks]
 
+    # Batch-load all events for these tasks in one query
+    all_events: list[AgentEventDB] = []
+    if task_ids:
+        stmt = select(AgentEventDB).where(AgentEventDB.task_id.in_(task_ids)).order_by(AgentEventDB.created_at)
+        result = await session.execute(stmt)
+        all_events = list(result.scalars().all())
+
+    items: list[dict] = []
     for task in tasks:
         items.append(
             {
                 "type": "task",
                 "timestamp": task.created_at.isoformat() if task.created_at else "",
-                "data": {
-                    "task_id": str(task.id),
-                    "agent_type": task.agent_type,
-                    "status": task.status,
-                },
+                "data": {"task_id": str(task.id), "agent_type": task.agent_type, "status": task.status},
             }
         )
-
-        events = await list_events_for_task(session, task.id)
-        for ev in events:
-            items.append(
-                {
-                    "type": "event",
-                    "timestamp": ev.created_at.isoformat() if ev.created_at else "",
-                    "data": {
-                        "event_id": str(ev.id),
-                        "task_id": str(ev.task_id),
-                        "event_type": ev.event_type,
-                        "detail": ev.data,
-                    },
-                }
-            )
-
-        for gate in task.gates:
+        for gate in task.gates or []:
             items.append(
                 {
                     "type": "gate",
@@ -148,6 +136,20 @@ async def get_patient_activity(session: AsyncSession, patient_id: UUID) -> list[
                     },
                 }
             )
+
+    for ev in all_events:
+        items.append(
+            {
+                "type": "event",
+                "timestamp": ev.created_at.isoformat() if ev.created_at else "",
+                "data": {
+                    "event_id": str(ev.id),
+                    "task_id": str(ev.task_id),
+                    "event_type": ev.event_type,
+                    "detail": ev.data,
+                },
+            }
+        )
 
     items.sort(key=lambda x: x["timestamp"], reverse=True)
     return items
