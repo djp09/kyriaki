@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from abc import ABC, abstractmethod
@@ -97,19 +98,20 @@ class DossierAgent(BaseAgent):
         top_matches = sorted(matches, key=lambda m: m.get("match_score", 0), reverse=True)[:top_n]
         await ctx.emit("progress", {"step": "deep_analysis", "trial_count": len(top_matches)})
 
-        sections = []
-        for i, match in enumerate(top_matches):
+        # Parallel analysis — all trials analyzed concurrently (like MatchingAgent)
+        async def _analyze_one(i: int, match: dict) -> dict:
             await ctx.emit(
                 "progress",
                 {"step": "analyzing_trial", "trial_index": i + 1, "total": len(top_matches), "nct_id": match["nct_id"]},
             )
-            section = await self._analyze_deep(patient_data, match)
-            sections.append(section)
+            return await self._analyze_deep(patient_data, match)
+
+        sections = await asyncio.gather(*[_analyze_one(i, m) for i, m in enumerate(top_matches)])
 
         dossier = {
             "patient_summary": ctx.input_data.get("patient_summary", ""),
             "generated_at": datetime.now(timezone.utc).isoformat(),
-            "sections": sections,
+            "sections": list(sections),
         }
 
         return AgentResult(
