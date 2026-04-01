@@ -81,3 +81,36 @@ class GateResolution(BaseModel):
     status: str = Field(..., pattern="^(approved|rejected)$")
     resolved_by: str = Field(..., min_length=1)
     notes: str | None = None
+
+
+class GateResponse(BaseModel):
+    gate_id: str
+    task_id: str
+    gate_type: str
+    status: str
+    requested_data: dict | None = None
+    resolution_data: dict | None = None
+    created_at: str
+    resolved_at: str | None = None
+    resolved_by: str | None = None
+
+
+class EventResponse(BaseModel):
+    event_id: str
+    task_id: str
+    event_type: str
+    data: dict
+    created_at: str
+
+
+class TaskDetailResponse(TaskResponse):
+    """TaskResponse extended with parent linkage and gates."""
+
+    parent_task_id: str | None = None
+    gates: list[GateResponse] = Field(default_factory=list)
+
+
+class ActivityItem(BaseModel):
+    type: str  # "task", "event", "gate"
+    timestamp: str
+    data: dict

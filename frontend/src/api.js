@@ -95,3 +95,29 @@ export async function resolveGate(gateId, status, resolvedBy, notes = null) {
     body: JSON.stringify({ status, resolved_by: resolvedBy, notes }),
   });
 }
+
+// --- Phase 2B: Async dispatch + queries ---
+
+export async function startMatch(patient, maxResults = 10) {
+  return request(`${BASE}/agents/match`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ patient, max_results: maxResults }),
+  });
+}
+
+export async function startDossier(matchingTaskId, topN = 3) {
+  return request(`${BASE}/agents/dossier`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ matching_task_id: matchingTaskId, top_n: topN }),
+  });
+}
+
+export async function getTaskEvents(taskId) {
+  return request(`${BASE}/agents/tasks/${taskId}/events`);
+}
+
+export async function listGates(status = "pending") {
+  return request(`${BASE}/agents/gates?status=${encodeURIComponent(status)}`);
+}

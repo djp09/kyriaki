@@ -11,7 +11,7 @@ function scoreBadgeClass(score) {
   return "score-badge score-low";
 }
 
-export default function DossierView({ dossier, onBack, onApprove }) {
+export default function DossierView({ dossier, onBack, onApprove, approvalStatus }) {
   if (!dossier) return null;
 
   return (
@@ -138,9 +138,19 @@ export default function DossierView({ dossier, onBack, onApprove }) {
             All findings must be verified by your oncologist before taking any action.
           </span>
         </div>
-        {onApprove && (
-          <button className="btn btn-primary" onClick={onApprove} style={{ marginTop: "1rem" }}>
-            Mark as Reviewed
+        {approvalStatus === "approved" ? (
+          <div className="approval-badge" style={{ marginTop: "1rem" }}>
+            <span className="criterion-status status-met" style={{ display: "inline-flex", width: "22px", height: "22px", fontSize: "0.7rem", verticalAlign: "middle", marginRight: "0.5rem" }}>{"\u2713"}</span>
+            <strong>Reviewed and approved</strong>
+          </div>
+        ) : onApprove && (
+          <button
+            className="btn btn-primary"
+            onClick={onApprove}
+            disabled={approvalStatus === "approving"}
+            style={{ marginTop: "1rem" }}
+          >
+            {approvalStatus === "approving" ? "Approving..." : "Mark as Reviewed"}
           </button>
         )}
         <button className="btn btn-secondary" onClick={onBack} style={{ marginTop: "1rem", marginLeft: "0.75rem" }}>

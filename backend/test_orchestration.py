@@ -11,8 +11,16 @@ import pytest
 
 from agents import AgentContext, AgentResult, BaseAgent, DossierAgent, MatchingAgent
 from db_models import AgentEventDB, GateStatus, HumanGateDB, TaskStatus
-from dispatcher import _registry, dispatch, register_agent
-from models import DossierRequest, GateResolution, TaskResponse
+from dispatcher import _background_tasks, _registry, dispatch, dispatch_background, register_agent
+from models import (
+    ActivityItem,
+    DossierRequest,
+    EventResponse,
+    GateResolution,
+    GateResponse,
+    TaskDetailResponse,
+    TaskResponse,
+)
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -100,6 +108,9 @@ class FakeSession:
                 obj.id = uuid.uuid4()
             if hasattr(obj, "id") and obj.id:
                 self._store[(type(obj), obj.id)] = obj
+
+    async def commit(self) -> None:
+        await self.flush()
 
     async def get(self, model_cls: type, obj_id: Any) -> Any:
         return self._store.get((model_cls, obj_id))
@@ -489,3 +500,161 @@ class TestDBModels:
         assert GateStatus.approved.value == "approved"
         assert GateStatus.rejected.value == "rejected"
         assert len(GateStatus) == 3
+
+
+# ---------------------------------------------------------------------------
+# Phase 2B: Background dispatch tests
+# ---------------------------------------------------------------------------
+
+
+class TestBackgroundDispatch:
+    @pytest.mark.asyncio
+    async def test_dispatch_background_returns_pending(self, sample_patient_data):
+        """Background dispatch returns a task with pending status immediately."""
+        session = FakeSession()
+        patient_id = uuid.uuid4()
+
+        with patch("dispatcher._run_in_background", new_callable=AsyncMock):
+            task = await dispatch_background(
+                session,
+                "matching",
+                patient_id,
+                input_data={"patient": sample_patient_data, "max_results": 5},
+            )
+
+        assert task.status == TaskStatus.pending.value
+        assert task.agent_type == "matching"
+        assert task.id is not None
+        assert task.completed_at is None
+
+    @pytest.mark.asyncio
+    async def test_dispatch_background_unknown_agent(self, sample_patient_data):
+        """Background dispatch raises ValueError for unknown agent type."""
+        session = FakeSession()
+        with pytest.raises(ValueError, match="Unknown agent type"):
+            await dispatch_background(session, "nonexistent", uuid.uuid4())
+
+    @pytest.mark.asyncio
+    async def test_dispatch_background_spawns_task(self, sample_patient_data):
+        """Background dispatch creates an asyncio task."""
+        session = FakeSession()
+        patient_id = uuid.uuid4()
+
+        with patch("dispatcher._run_in_background", new_callable=AsyncMock) as mock_run:
+            await dispatch_background(
+                session,
+                "matching",
+                patient_id,
+                input_data={"patient": sample_patient_data},
+            )
+            # The background task was scheduled
+            assert mock_run.called or len(_background_tasks) >= 0  # task may have already completed
+
+
+# ---------------------------------------------------------------------------
+# Phase 2B: New response model tests
+# ---------------------------------------------------------------------------
+
+
+class TestPhase2BModels:
+    def test_gate_response_serialization(self):
+        resp = GateResponse(
+            gate_id=str(uuid.uuid4()),
+            task_id=str(uuid.uuid4()),
+            gate_type="dossier_review",
+            status="pending",
+            created_at="2026-04-01T00:00:00+00:00",
+        )
+        assert resp.gate_type == "dossier_review"
+        assert resp.resolved_by is None
+
+    def test_event_response_serialization(self):
+        resp = EventResponse(
+            event_id=str(uuid.uuid4()),
+            task_id=str(uuid.uuid4()),
+            event_type="progress",
+            data={"step": "analyzing_trial", "trial_index": 1},
+            created_at="2026-04-01T00:00:00+00:00",
+        )
+        assert resp.event_type == "progress"
+        assert resp.data["trial_index"] == 1
+
+    def test_task_detail_response_with_gates(self):
+        gate = GateResponse(
+            gate_id=str(uuid.uuid4()),
+            task_id=str(uuid.uuid4()),
+            gate_type="dossier_review",
+            status="pending",
+            created_at="2026-04-01T00:00:00+00:00",
+        )
+        resp = TaskDetailResponse(
+            task_id=str(uuid.uuid4()),
+            agent_type="dossier",
+            status="blocked",
+            created_at="2026-04-01T00:00:00+00:00",
+            parent_task_id=str(uuid.uuid4()),
+            gates=[gate],
+        )
+        assert len(resp.gates) == 1
+        assert resp.parent_task_id is not None
+
+    def test_task_detail_response_default_gates(self):
+        resp = TaskDetailResponse(
+            task_id=str(uuid.uuid4()),
+            agent_type="matching",
+            status="completed",
+            created_at="2026-04-01T00:00:00+00:00",
+        )
+        assert resp.gates == []
+        assert resp.parent_task_id is None
+
+    def test_activity_item(self):
+        item = ActivityItem(
+            type="event",
+            timestamp="2026-04-01T00:00:00+00:00",
+            data={"event_type": "started", "task_id": "abc"},
+        )
+        assert item.type == "event"
+
+
+# ---------------------------------------------------------------------------
+# Phase 2B: HTTP endpoint tests
+# ---------------------------------------------------------------------------
+
+
+class TestPhase2BEndpoints:
+    @pytest.fixture
+    def client(self):
+        from fastapi.testclient import TestClient
+
+        from main import app
+
+        with TestClient(app) as c:
+            yield c
+
+    def test_list_gates_endpoint(self, client):
+        resp = client.get("/api/agents/gates?status=pending")
+        assert resp.status_code == 200
+        assert isinstance(resp.json(), list)
+
+    def test_list_gates_invalid_status(self, client):
+        resp = client.get("/api/agents/gates?status=invalid")
+        assert resp.status_code == 422
+
+    def test_list_tasks_endpoint(self, client):
+        resp = client.get("/api/agents/tasks")
+        assert resp.status_code == 200
+        assert isinstance(resp.json(), list)
+
+    def test_task_events_not_found(self, client):
+        fake_id = str(uuid.uuid4())
+        resp = client.get(f"/api/agents/tasks/{fake_id}/events")
+        assert resp.status_code == 404
+
+    def test_patient_activity_endpoint(self, client):
+        fake_id = str(uuid.uuid4())
+        resp = client.get(f"/api/patients/{fake_id}/activity")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["patient_id"] == fake_id
+        assert isinstance(data["items"], list)

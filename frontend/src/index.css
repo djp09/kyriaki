@@ -486,6 +486,23 @@ header h1 {
   transition: width 0.8s ease-out;
 }
 
+.loading-progress-bar.progress-indeterminate {
+  width: 40%;
+  animation: indeterminate 1.5s ease-in-out infinite;
+}
+
+@keyframes indeterminate {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(350%); }
+}
+
+.approval-badge {
+  display: inline-flex;
+  align-items: center;
+  color: #059669;
+  font-size: 0.93rem;
+}
+
 .loading-patience {
   font-size: 0.82rem;
   color: #9ca3af;
