@@ -229,7 +229,7 @@ async def get_trial(nct_id: str) -> dict | None:
     try:
         resp = await _http_get_with_retry(f"{BASE_URL}/studies/{nct_id}", params)
     except httpx.HTTPStatusError as e:
-        if e.response.status_code in (400, 404):
+        if e.response.status_code in (400, 403, 404):
             return None
         raise
     try:

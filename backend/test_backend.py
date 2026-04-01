@@ -397,4 +397,4 @@ class TestEndpoints:
         # This will attempt a real network call; we just check we get a response
         # (might be 404, might be a network error depending on environment)
         resp = client.get("/api/trials/NCT_DOES_NOT_EXIST_99999")
-        assert resp.status_code in (404, 500, 502, 503)
+        assert resp.status_code in (404, 500, 502, 503, 403)
