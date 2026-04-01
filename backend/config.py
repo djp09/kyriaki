@@ -1,11 +1,14 @@
 """Centralized configuration via pydantic-settings.
 
-All config is loaded from environment variables (KYRIAKI_ prefix) or .env file.
+Loads from environment variables (KYRIAKI_ prefix) or .env file.
+Also accepts ANTHROPIC_API_KEY without prefix for backwards compatibility.
 """
 
+import os
 from functools import lru_cache
 from typing import List
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -39,6 +42,13 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     log_format: str = "json"  # "json" or "text"
     environment: str = "development"
+
+    @model_validator(mode="after")
+    def _load_anthropic_key_fallback(self):
+        """Accept ANTHROPIC_API_KEY without the KYRIAKI_ prefix (backwards compat with .env)."""
+        if not self.anthropic_api_key:
+            self.anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        return self
 
 
 @lru_cache
