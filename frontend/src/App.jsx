@@ -244,6 +244,11 @@ export default function App() {
         {view === "loading" && (
           <div className="loading" role="status" aria-live="polite">
             <h2>Searching for your matches</h2>
+            <div className="agent-badge">
+              <span className="agent-dot" />
+              MatchingAgent running
+              {matchTaskId && <span className="agent-task-id">{matchTaskId.slice(0, 8)}</span>}
+            </div>
             <div className="spinner" aria-hidden="true">
               <div className="spinner-ring" />
               <div className="spinner-ring spinner-ring-2" />

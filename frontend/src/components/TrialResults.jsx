@@ -86,6 +86,12 @@ export default function TrialResults({ data, onSelect, onBack, onDossier, onView
           ))}
 
           <div className="results-footer">
+            {dossierStatus === "loading" && (
+              <div className="agent-badge" style={{ marginBottom: "1rem" }}>
+                <span className="agent-dot" />
+                DossierAgent running — deep eligibility analysis in progress
+              </div>
+            )}
             {data.task_id && onDossier && dossierStatus !== "done" && (
               <button
                 className="btn btn-primary"
