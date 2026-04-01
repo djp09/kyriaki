@@ -1,16 +1,31 @@
 # secrets
 .env
 backend/.env
+*.pem
+*.key
+*.crt
 
 # python
 __pycache__/
 *.pyc
 *.db
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
 
 # node
 node_modules/
 frontend/dist/
-.claude/
 
-# Design docs (keep out of repo)
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE / tools
+.claude/
+.vscode/
+.idea/
+
+# design docs (keep out of repo)
 Kyriaki_*.md
