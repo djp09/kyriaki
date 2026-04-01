@@ -1,8 +1,10 @@
+from __future__ import annotations
+
 from dotenv import load_dotenv
+
 load_dotenv()
 
 import asyncio
-from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,10 +12,10 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
 from config import get_settings
-from logging_config import setup_logging, get_logger
-from middleware import RequestLoggingMiddleware
-from models import PatientProfile, MatchRequest, MatchResponse
+from logging_config import get_logger, setup_logging
 from matching_engine import match_trials
+from middleware import RequestLoggingMiddleware
+from models import MatchRequest, MatchResponse, PatientProfile
 from trials_client import get_trial
 
 settings = get_settings()
@@ -33,7 +35,7 @@ app.add_middleware(
 )
 
 
-def _error_response(status_code: int, message: str, detail: Optional[str] = None) -> JSONResponse:
+def _error_response(status_code: int, message: str, detail: str | None = None) -> JSONResponse:
     body: dict = {"error": True, "message": message}
     if detail:
         body["detail"] = detail
@@ -64,6 +66,7 @@ async def general_exception_handler(request: Request, exc: Exception):
 @app.get("/api/health")
 async def health():
     from database import check_db_health
+
     db_ok = await check_db_health()
     return {
         "status": "ok" if db_ok else "degraded",
@@ -84,7 +87,7 @@ async def match(request: MatchRequest):
             timeout=settings.match_timeout,
         )
         return MatchResponse(**result)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         return _error_response(
             504,
             "The matching process took too long. Please try again with fewer results or a more specific cancer type.",

@@ -1,16 +1,17 @@
+from __future__ import annotations
+
 import asyncio
 import json
 import re
 import time
-from typing import Dict, List, Optional
 
 import anthropic
 
 from config import get_settings
 from logging_config import get_logger
-from models import PatientProfile, TrialMatch, CriterionEvaluation
+from models import CriterionEvaluation, PatientProfile, TrialMatch
 from prompts import ELIGIBILITY_ANALYSIS_PROMPT, PATIENT_SUMMARY_PROMPT
-from trials_client import search_trials, find_nearest_site
+from trials_client import find_nearest_site, search_trials
 
 logger = get_logger("kyriaki.matching")
 
@@ -38,14 +39,14 @@ async def _call_claude_with_retry(
         except anthropic.RateLimitError:
             if attempt == max_retries - 1:
                 raise
-            wait_time = 2 ** attempt * 2
+            wait_time = 2**attempt * 2
             logger.warning("claude.rate_limited", attempt=attempt + 1, max_retries=max_retries, wait_s=wait_time)
             await asyncio.sleep(wait_time)
         except anthropic.APIStatusError as e:
             if e.status_code == 429:
                 if attempt == max_retries - 1:
                     raise
-                wait_time = 2 ** attempt * 2
+                wait_time = 2**attempt * 2
                 logger.warning("claude.rate_limited", attempt=attempt + 1, max_retries=max_retries, wait_s=wait_time)
                 await asyncio.sleep(wait_time)
             else:
@@ -71,14 +72,12 @@ async def _paced_claude_call(
         elapsed = now - _last_call_time
         if elapsed < settings.inter_call_delay:
             await asyncio.sleep(settings.inter_call_delay - elapsed)
-        result = await _call_claude_with_retry(
-            client, model=model, max_tokens=max_tokens, messages=messages
-        )
+        result = await _call_claude_with_retry(client, model=model, max_tokens=max_tokens, messages=messages)
         _last_call_time = time.monotonic()
         return result
 
 
-def _parse_json_response(text: str) -> Optional[Dict]:
+def _parse_json_response(text: str) -> dict | None:
     if not text:
         return None
 
@@ -114,7 +113,7 @@ def _parse_json_response(text: str) -> Optional[Dict]:
     return None
 
 
-def _repair_truncated_json(text: str) -> Optional[str]:
+def _repair_truncated_json(text: str) -> str | None:
     stack = []
     in_string = False
     escape_next = False
@@ -135,9 +134,8 @@ def _repair_truncated_json(text: str) -> Optional[str]:
 
         if ch in "{[":
             stack.append("}" if ch == "{" else "]")
-        elif ch in "}]":
-            if stack and stack[-1] == ch:
-                stack.pop()
+        elif ch in "}]" and stack and stack[-1] == ch:
+            stack.pop()
 
     if not stack:
         return text
@@ -148,9 +146,9 @@ def _repair_truncated_json(text: str) -> Optional[str]:
         truncated += '"'
 
     truncated = re.sub(r',\s*"[^"]*$', "", truncated)
-    truncated = re.sub(r',\s*$', "", truncated)
+    truncated = re.sub(r",\s*$", "", truncated)
     truncated = re.sub(r':\s*"[^"]*$', ': ""', truncated)
-    truncated = re.sub(r":\s*$", ': null', truncated)
+    truncated = re.sub(r":\s*$", ": null", truncated)
 
     for closer in reversed(stack):
         truncated += closer
@@ -158,24 +156,28 @@ def _repair_truncated_json(text: str) -> Optional[str]:
     return truncated
 
 
-def _extract_minimal_result(text: str, nct_id: str) -> Optional[Dict]:
+def _extract_minimal_result(text: str, nct_id: str) -> dict | None:
     score_match = re.search(r'"match_score"\s*:\s*(\d+)', text)
     explanation_match = re.search(r'"match_explanation"\s*:\s*"([^"]*)"', text)
 
     if score_match:
         return {
             "match_score": int(score_match.group(1)),
-            "match_explanation": explanation_match.group(1) if explanation_match else "Analysis could not be fully parsed. Please review the trial details with your oncologist.",
+            "match_explanation": explanation_match.group(1)
+            if explanation_match
+            else "Analysis could not be fully parsed. Please review the trial details with your oncologist.",
             "inclusion_evaluations": [],
             "exclusion_evaluations": [],
-            "flags_for_oncologist": ["Full eligibility analysis was incomplete — discuss all criteria with your oncologist"],
+            "flags_for_oncologist": [
+                "Full eligibility analysis was incomplete — discuss all criteria with your oncologist"
+            ],
         }
     return None
 
 
 async def _analyze_trial(
-    patient: PatientProfile, trial: Dict, trial_index: int = 0, total_trials: int = 0
-) -> Optional[Dict]:
+    patient: PatientProfile, trial: dict, trial_index: int = 0, total_trials: int = 0
+) -> dict | None:
     settings = get_settings()
     label = f"{trial_index}/{total_trials}" if total_trials else ""
     nct_id = trial["nct_id"]
@@ -266,17 +268,17 @@ async def _generate_patient_summary(patient: PatientProfile) -> str:
 
         summary = f"You are a {patient.age}-year-old navigating {patient.cancer_stage} {patient.cancer_type}."
         if treatments_str:
-            summary += f" You have been through {patient.lines_of_therapy} line(s) of treatment including {treatments_str}."
+            summary += (
+                f" You have been through {patient.lines_of_therapy} line(s) of treatment including {treatments_str}."
+            )
         if biomarkers_str:
             summary += f" Your biomarker profile includes {biomarkers_str}."
         summary += " We are searching for clinical trials that may be a good fit for your specific situation."
         return summary
 
 
-def _build_unscored_match(trial: Dict, patient: PatientProfile) -> TrialMatch:
-    nearest_site, distance = find_nearest_site(
-        trial.get("locations", []), patient.location_zip
-    )
+def _build_unscored_match(trial: dict, patient: PatientProfile) -> TrialMatch:
+    nearest_site, distance = find_nearest_site(trial.get("locations", []), patient.location_zip)
     return TrialMatch(
         nct_id=trial["nct_id"],
         brief_title=trial["brief_title"],
@@ -296,7 +298,7 @@ def _build_unscored_match(trial: Dict, patient: PatientProfile) -> TrialMatch:
     )
 
 
-async def match_trials(patient: PatientProfile, max_results: int = 10) -> Dict:
+async def match_trials(patient: PatientProfile, max_results: int = 10) -> dict:
     settings = get_settings()
 
     trials = await search_trials(
@@ -310,7 +312,7 @@ async def match_trials(patient: PatientProfile, max_results: int = 10) -> Dict:
 
     semaphore = asyncio.Semaphore(settings.max_concurrent_analyses)
 
-    async def analyze_with_limit(trial: Dict, index: int):
+    async def analyze_with_limit(trial: dict, index: int):
         async with semaphore:
             return trial, await _analyze_trial(patient, trial, index, total)
 
@@ -318,7 +320,7 @@ async def match_trials(patient: PatientProfile, max_results: int = 10) -> Dict:
     analysis_tasks = [analyze_with_limit(trial, i + 1) for i, trial in enumerate(trials)]
     results = await asyncio.gather(*analysis_tasks)
 
-    matches: List[TrialMatch] = []
+    matches: list[TrialMatch] = []
     all_analyses_failed = all(analysis is None for _, analysis in results)
 
     if all_analyses_failed and trials:
@@ -332,9 +334,7 @@ async def match_trials(patient: PatientProfile, max_results: int = 10) -> Dict:
             if analysis is None:
                 continue
 
-            nearest_site, distance = find_nearest_site(
-                trial.get("locations", []), patient.location_zip
-            )
+            nearest_site, distance = find_nearest_site(trial.get("locations", []), patient.location_zip)
 
             if distance is not None and distance > patient.willing_to_travel_miles:
                 continue
@@ -350,14 +350,8 @@ async def match_trials(patient: PatientProfile, max_results: int = 10) -> Dict:
                     eligibility_criteria=trial["eligibility_criteria"],
                     match_score=analysis.get("match_score", 0),
                     match_explanation=analysis.get("match_explanation", ""),
-                    inclusion_evaluations=[
-                        CriterionEvaluation(**e)
-                        for e in analysis.get("inclusion_evaluations", [])
-                    ],
-                    exclusion_evaluations=[
-                        CriterionEvaluation(**e)
-                        for e in analysis.get("exclusion_evaluations", [])
-                    ],
+                    inclusion_evaluations=[CriterionEvaluation(**e) for e in analysis.get("inclusion_evaluations", [])],
+                    exclusion_evaluations=[CriterionEvaluation(**e) for e in analysis.get("exclusion_evaluations", [])],
                     flags_for_oncologist=analysis.get("flags_for_oncologist", []),
                     nearest_site=nearest_site,
                     distance_miles=distance,

@@ -3,18 +3,18 @@
 import pytest
 from pydantic import ValidationError
 
-from models import PatientProfile, MatchRequest
+from models import PatientProfile
 from trials_client import (
     _extract_study,
-    _parse_age_years,
     _haversine_miles,
+    _parse_age_years,
     find_nearest_site,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
 # ---------------------------------------------------------------------------
+
 
 def _valid_patient(**overrides) -> dict:
     """Return a valid patient profile dict with optional overrides."""
@@ -92,6 +92,7 @@ SAMPLE_CTGOV_STUDY = {
 # ---------------------------------------------------------------------------
 # PatientProfile validation tests
 # ---------------------------------------------------------------------------
+
 
 class TestPatientProfile:
     def test_valid_profile(self):
@@ -175,6 +176,7 @@ class TestPatientProfile:
 # _extract_study tests
 # ---------------------------------------------------------------------------
 
+
 class TestExtractStudy:
     def test_full_study(self):
         result = _extract_study(SAMPLE_CTGOV_STUDY)
@@ -224,6 +226,7 @@ class TestExtractStudy:
 # _parse_age_years tests
 # ---------------------------------------------------------------------------
 
+
 class TestParseAgeYears:
     def test_standard_format(self):
         assert _parse_age_years("18 Years") == 18
@@ -252,6 +255,7 @@ class TestParseAgeYears:
 # _haversine_miles tests
 # ---------------------------------------------------------------------------
 
+
 class TestHaversineMiles:
     def test_same_point(self):
         assert _haversine_miles(40.0, -74.0, 40.0, -74.0) == 0.0
@@ -275,6 +279,7 @@ class TestHaversineMiles:
 # ---------------------------------------------------------------------------
 # find_nearest_site tests
 # ---------------------------------------------------------------------------
+
 
 class TestFindNearestSite:
     def test_finds_nearest(self):
@@ -336,11 +341,14 @@ class TestFindNearestSite:
 # FastAPI endpoint tests
 # ---------------------------------------------------------------------------
 
+
 class TestEndpoints:
     @pytest.fixture
     def client(self):
         from fastapi.testclient import TestClient
+
         from main import app
+
         return TestClient(app)
 
     def test_health(self, client):
@@ -371,13 +379,16 @@ class TestEndpoints:
 
     def test_intake_minimal_valid(self, client):
         """Only required fields."""
-        resp = client.post("/api/intake", json={
-            "cancer_type": "TNBC",
-            "cancer_stage": "Stage III",
-            "age": 45,
-            "sex": "female",
-            "location_zip": "90001",
-        })
+        resp = client.post(
+            "/api/intake",
+            json={
+                "cancer_type": "TNBC",
+                "cancer_stage": "Stage III",
+                "age": 45,
+                "sex": "female",
+                "location_zip": "90001",
+            },
+        )
         assert resp.status_code == 200
 
     def test_trial_detail_not_found(self, client):

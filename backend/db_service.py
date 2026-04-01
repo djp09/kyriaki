@@ -1,6 +1,7 @@
 """Database service layer — CRUD operations for patient profiles and match results."""
 
-from typing import Dict, List
+from __future__ import annotations
+
 from uuid import UUID
 
 from sqlalchemy import select
@@ -10,7 +11,7 @@ from sqlalchemy.orm import selectinload
 from db_models import MatchResultDB, MatchSessionDB, PatientProfileDB
 
 
-async def save_patient_profile(session: AsyncSession, profile_data: Dict) -> PatientProfileDB:
+async def save_patient_profile(session: AsyncSession, profile_data: dict) -> PatientProfileDB:
     """Persist a patient profile and return the ORM instance."""
     patient = PatientProfileDB(**profile_data)
     session.add(patient)
@@ -35,7 +36,7 @@ async def save_match_session(
     return ms
 
 
-async def save_match_result(session: AsyncSession, session_id: UUID, match_data: Dict) -> MatchResultDB:
+async def save_match_result(session: AsyncSession, session_id: UUID, match_data: dict) -> MatchResultDB:
     """Save a single trial match result."""
     mr = MatchResultDB(session_id=session_id, **match_data)
     session.add(mr)
@@ -43,7 +44,7 @@ async def save_match_result(session: AsyncSession, session_id: UUID, match_data:
     return mr
 
 
-async def get_patient_history(session: AsyncSession, patient_id: UUID) -> List[MatchSessionDB]:
+async def get_patient_history(session: AsyncSession, patient_id: UUID) -> list[MatchSessionDB]:
     """Retrieve all match sessions for a patient, newest first."""
     stmt = (
         select(MatchSessionDB)
@@ -55,12 +56,10 @@ async def get_patient_history(session: AsyncSession, patient_id: UUID) -> List[M
     return list(result.scalars().all())
 
 
-async def get_match_results(session: AsyncSession, session_id: UUID) -> List[MatchResultDB]:
+async def get_match_results(session: AsyncSession, session_id: UUID) -> list[MatchResultDB]:
     """Retrieve all match results for a session, highest score first."""
     stmt = (
-        select(MatchResultDB)
-        .where(MatchResultDB.session_id == session_id)
-        .order_by(MatchResultDB.match_score.desc())
+        select(MatchResultDB).where(MatchResultDB.session_id == session_id).order_by(MatchResultDB.match_score.desc())
     )
     result = await session.execute(stmt)
     return list(result.scalars().all())

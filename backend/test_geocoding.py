@@ -1,7 +1,5 @@
 """Tests for the geocoding service."""
 
-import pytest
-
 from geocoding import get_coordinates, get_zip_info
 
 

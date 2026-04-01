@@ -4,9 +4,10 @@ Uses pgeocode for instant local lookups (GeoNames dataset of all US postal codes
 Falls back to hardcoded prefix map, then US geographic center.
 """
 
-from functools import lru_cache
-from typing import Dict, Optional, Tuple
+from __future__ import annotations
+
 import math
+from functools import lru_cache
 
 from logging_config import get_logger
 
@@ -16,13 +17,14 @@ logger = get_logger("kyriaki.geocoding")
 _nomi = None
 try:
     import pgeocode
+
     _nomi = pgeocode.Nominatim("us")
     logger.info("geocoding.init", backend="pgeocode", status="ok")
 except Exception as e:
     logger.warning("geocoding.init", backend="pgeocode", status="unavailable", error=str(e))
 
 # Fallback: hardcoded prefix map (same as the original prototype)
-_ZIP_PREFIX_COORDS: Dict[str, Tuple[float, float]] = {
+_ZIP_PREFIX_COORDS: dict[str, tuple[float, float]] = {
     "100": (40.71, -74.01),
     "021": (42.36, -71.06),
     "606": (41.88, -87.63),
@@ -40,11 +42,11 @@ _ZIP_PREFIX_COORDS: Dict[str, Tuple[float, float]] = {
     "551": (44.98, -93.27),
 }
 
-_US_CENTER: Tuple[float, float] = (39.8, -98.6)
+_US_CENTER: tuple[float, float] = (39.8, -98.6)
 
 
 @lru_cache(maxsize=2048)
-def get_coordinates(zip_code: str) -> Tuple[float, float]:
+def get_coordinates(zip_code: str) -> tuple[float, float]:
     """Return (lat, lon) for a US ZIP code. Always returns a result (falls back to US center)."""
     # Strategy 1: pgeocode local database
     if _nomi is not None:
@@ -67,7 +69,7 @@ def get_coordinates(zip_code: str) -> Tuple[float, float]:
 
 
 @lru_cache(maxsize=2048)
-def get_zip_info(zip_code: str) -> Optional[Dict]:
+def get_zip_info(zip_code: str) -> dict | None:
     """Return full ZIP info (city, state, lat, lon) or None."""
     if _nomi is None:
         coords = get_coordinates(zip_code)

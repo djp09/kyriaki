@@ -1,5 +1,5 @@
 [tool.ruff]
-target-version = "py311"
+target-version = "py39"
 line-length = 120
 
 [tool.ruff.lint]
@@ -8,6 +8,11 @@ ignore = [
     "S101",   # assert allowed in tests
     "E501",   # line length handled by formatter
 ]
+
+[tool.ruff.lint.per-file-ignores]
+"main.py" = ["E402"]  # load_dotenv() must run before imports
+"test_*.py" = ["B017"]  # broad exception in pytest.raises is fine for validation tests
+"alembic/*" = ["UP"]  # alembic templates use old-style typing
 
 [tool.ruff.format]
 quote-style = "double"

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Tuple
 import asyncio
 import math
 import time
@@ -15,39 +14,34 @@ logger = get_logger("kyriaki.trials")
 
 BASE_URL = "https://clinicaltrials.gov/api/v2"
 
-FIELDS = ",".join([
-    "NCTId",
-    "BriefTitle",
-    "OfficialTitle",
-    "Condition",
-    "Phase",
-    "EligibilityModule",
-    "ContactsLocationsModule",
-    "DescriptionModule",
-    "StatusModule",
-    "ArmsInterventionsModule",
-])
+FIELDS = ",".join(
+    [
+        "NCTId",
+        "BriefTitle",
+        "OfficialTitle",
+        "Condition",
+        "Phase",
+        "EligibilityModule",
+        "ContactsLocationsModule",
+        "DescriptionModule",
+        "StatusModule",
+        "ArmsInterventionsModule",
+    ]
+)
 
 # Simple in-memory cache: key -> (timestamp, data)
-_search_cache: Dict[str, Tuple[float, List[Dict]]] = {}
+_search_cache: dict[str, tuple[float, list[dict]]] = {}
 
 
 def _haversine_miles(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     R = 3959  # Earth radius in miles
     dlat = math.radians(lat2 - lat1)
     dlon = math.radians(lon2 - lon1)
-    a = (
-        math.sin(dlat / 2) ** 2
-        + math.cos(math.radians(lat1))
-        * math.cos(math.radians(lat2))
-        * math.sin(dlon / 2) ** 2
-    )
+    a = math.sin(dlat / 2) ** 2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2) ** 2
     return R * 2 * math.asin(math.sqrt(a))
 
 
-def find_nearest_site(
-    locations: List[Dict], patient_zip: str
-) -> Tuple[Optional[Dict], Optional[float]]:
+def find_nearest_site(locations: list[dict], patient_zip: str) -> tuple[dict | None, float | None]:
     """Find the nearest trial site to the patient's ZIP code."""
     patient_coords = get_coordinates(patient_zip)
     if not patient_coords or not locations:
@@ -80,7 +74,7 @@ def find_nearest_site(
     return best_site, round(best_distance, 1)
 
 
-def _extract_study(study: Dict) -> Dict:
+def _extract_study(study: dict) -> dict:
     ps = study.get("protocolSection", {})
     ident = ps.get("identificationModule", {})
     status = ps.get("statusModule", {})
@@ -116,7 +110,7 @@ def _extract_study(study: Dict) -> Dict:
     }
 
 
-def _parse_age_years(age_str: str) -> Optional[int]:
+def _parse_age_years(age_str: str) -> int | None:
     if not age_str:
         return None
     parts = age_str.split()
@@ -126,23 +120,22 @@ def _parse_age_years(age_str: str) -> Optional[int]:
         return None
 
 
-def _cache_key(cancer_type: str, age: Optional[int], sex: Optional[str], page_size: int) -> str:
+def _cache_key(cancer_type: str, age: int | None, sex: str | None, page_size: int) -> str:
     return f"{cancer_type}|{age}|{sex}|{page_size}"
 
 
-def _get_cached(key: str) -> Optional[List[Dict]]:
+def _get_cached(key: str) -> list[dict] | None:
     settings = get_settings()
     if key in _search_cache:
         ts, data = _search_cache[key]
         if time.time() - ts < settings.cache_ttl:
             logger.debug("trials.cache_hit", key=key)
             return data
-        else:
-            del _search_cache[key]
+        del _search_cache[key]
     return None
 
 
-def _set_cache(key: str, data: List[Dict]) -> None:
+def _set_cache(key: str, data: list[dict]) -> None:
     _search_cache[key] = (time.time(), data)
 
 
@@ -161,13 +154,13 @@ async def _http_get_with_retry(
                 return resp
         except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout) as e:
             last_exc = e
-            wait = 2 ** attempt
+            wait = 2**attempt
             logger.warning("trials.network_error", error_type=type(e).__name__, attempt=attempt + 1, wait_s=wait)
             await asyncio.sleep(wait)
         except httpx.HTTPStatusError as e:
             if e.response.status_code in (429, 500, 502, 503, 504):
                 last_exc = e
-                wait = 2 ** attempt
+                wait = 2**attempt
                 logger.warning("trials.http_error", status=e.response.status_code, attempt=attempt + 1, wait_s=wait)
                 await asyncio.sleep(wait)
             else:
@@ -177,10 +170,10 @@ async def _http_get_with_retry(
 
 async def search_trials(
     cancer_type: str,
-    age: Optional[int] = None,
-    sex: Optional[str] = None,
+    age: int | None = None,
+    sex: str | None = None,
     page_size: int = 10,
-) -> List[Dict]:
+) -> list[dict]:
     cache_k = _cache_key(cancer_type, age, sex, page_size)
     cached = _get_cached(cache_k)
     if cached is not None:
@@ -201,7 +194,9 @@ async def search_trials(
         return []
 
     if not isinstance(data, dict) or "studies" not in data:
-        logger.error("trials.unexpected_response", keys=list(data.keys()) if isinstance(data, dict) else str(type(data)))
+        logger.error(
+            "trials.unexpected_response", keys=list(data.keys()) if isinstance(data, dict) else str(type(data))
+        )
         return []
 
     studies = []
@@ -220,9 +215,8 @@ async def search_trials(
             if max_age and age > max_age:
                 continue
 
-        if sex and study.get("sex") != "ALL":
-            if study["sex"].upper() != sex.upper():
-                continue
+        if sex and study.get("sex") != "ALL" and study["sex"].upper() != sex.upper():
+            continue
 
         studies.append(study)
 
@@ -230,7 +224,7 @@ async def search_trials(
     return studies
 
 
-async def get_trial(nct_id: str) -> Optional[Dict]:
+async def get_trial(nct_id: str) -> dict | None:
     params = {"fields": FIELDS}
     try:
         resp = await _http_get_with_retry(f"{BASE_URL}/studies/{nct_id}", params)

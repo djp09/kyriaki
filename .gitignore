@@ -9,3 +9,4 @@ __pycache__/
 # node
 node_modules/
 frontend/dist/
+.claude/

@@ -4,16 +4,15 @@ import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-import pytest_asyncio
 
-from models import PatientProfile, TrialMatch, CriterionEvaluation, MatchRequest, MatchResponse
-from matching_engine import _parse_json_response, _repair_truncated_json, _extract_minimal_result
+from matching_engine import _extract_minimal_result, _parse_json_response, _repair_truncated_json
+from models import CriterionEvaluation, MatchRequest, MatchResponse, PatientProfile, TrialMatch
 from prompts import ELIGIBILITY_ANALYSIS_PROMPT, PATIENT_SUMMARY_PROMPT
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def sample_patient():
@@ -68,7 +67,11 @@ def valid_analysis_json():
             {"criterion": "Stage IV NSCLC", "status": "met", "explanation": "Patient has Stage IV NSCLC"},
         ],
         "exclusion_evaluations": [
-            {"criterion": "Active brain metastases", "status": "not_triggered", "explanation": "No brain mets reported"},
+            {
+                "criterion": "Active brain metastases",
+                "status": "not_triggered",
+                "explanation": "No brain mets reported",
+            },
         ],
         "flags_for_oncologist": ["Confirm no brain metastases"],
     }
@@ -77,6 +80,7 @@ def valid_analysis_json():
 # ---------------------------------------------------------------------------
 # JSON parsing tests
 # ---------------------------------------------------------------------------
+
 
 class TestParseJsonResponse:
     def test_valid_json(self, valid_analysis_json):
@@ -187,7 +191,9 @@ class TestExtractMinimalResult:
         result = _extract_minimal_result(text, "NCT00000000")
         assert result is not None
         assert result["match_score"] == 42
-        assert "incomplete" in result["match_explanation"].lower() or "oncologist" in result["match_explanation"].lower()
+        assert (
+            "incomplete" in result["match_explanation"].lower() or "oncologist" in result["match_explanation"].lower()
+        )
 
     def test_no_score_returns_none(self):
         result = _extract_minimal_result("totally unparseable", "NCT00000000")
@@ -197,6 +203,7 @@ class TestExtractMinimalResult:
 # ---------------------------------------------------------------------------
 # Prompt formatting tests
 # ---------------------------------------------------------------------------
+
 
 class TestPromptFormatting:
     def test_eligibility_prompt_formats_correctly(self, sample_patient, sample_trial):
@@ -279,6 +286,7 @@ class TestPromptFormatting:
 # ---------------------------------------------------------------------------
 # Model validation tests
 # ---------------------------------------------------------------------------
+
 
 class TestPatientProfile:
     def test_valid_profile(self, sample_patient):
@@ -410,6 +418,7 @@ class TestMatchResponse:
 # Matching engine integration tests (with mocked Claude API)
 # ---------------------------------------------------------------------------
 
+
 class TestAnalyzeTrial:
     @pytest.mark.asyncio
     async def test_analyze_trial_success(self, sample_patient, sample_trial, valid_analysis_json):
@@ -487,13 +496,17 @@ class TestAnalyzeTrial:
         sample_trial["eligibility_criteria"] = "x " * 5000  # 10000 chars
 
         mock_response = MagicMock()
-        mock_response.content = [MagicMock(text='{"match_score": 50, "match_explanation": "OK", "inclusion_evaluations": [], "exclusion_evaluations": [], "flags_for_oncologist": []}')]
+        mock_response.content = [
+            MagicMock(
+                text='{"match_score": 50, "match_explanation": "OK", "inclusion_evaluations": [], "exclusion_evaluations": [], "flags_for_oncologist": []}'
+            )
+        ]
 
         mock_client = AsyncMock()
         mock_client.messages.create = AsyncMock(return_value=mock_response)
 
         with patch("matching_engine._get_client", return_value=mock_client):
-            result = await _analyze_trial(sample_patient, sample_trial)
+            await _analyze_trial(sample_patient, sample_trial)
 
         # Check the prompt was called and eligibility was truncated
         call_args = mock_client.messages.create.call_args

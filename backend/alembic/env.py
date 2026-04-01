@@ -3,13 +3,14 @@
 import asyncio
 import os
 
-from alembic import context
 from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
+import db_models  # noqa: F401 — registers models with Base.metadata
+from alembic import context
+
 # Import Base so all models are registered
 from database import Base
-import db_models  # noqa: F401 — registers models with Base.metadata
 
 config = context.config
 

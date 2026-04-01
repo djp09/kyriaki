@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import DateTime, Float, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSON, UUID
@@ -13,7 +13,7 @@ from database import Base
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _new_uuid() -> uuid.UUID:
@@ -40,7 +40,7 @@ class PatientProfileDB(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
 
-    match_sessions: Mapped[list["MatchSessionDB"]] = relationship(back_populates="patient", cascade="all, delete-orphan")
+    match_sessions: Mapped[list[MatchSessionDB]] = relationship(back_populates="patient", cascade="all, delete-orphan")
 
     __table_args__ = (
         Index("ix_patient_cancer_type", "cancer_type"),
@@ -57,8 +57,8 @@ class MatchSessionDB(Base):
     total_trials_screened: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
-    patient: Mapped["PatientProfileDB"] = relationship(back_populates="match_sessions")
-    match_results: Mapped[list["MatchResultDB"]] = relationship(back_populates="session", cascade="all, delete-orphan")
+    patient: Mapped[PatientProfileDB] = relationship(back_populates="match_sessions")
+    match_results: Mapped[list[MatchResultDB]] = relationship(back_populates="session", cascade="all, delete-orphan")
 
     __table_args__ = (
         Index("ix_session_patient_id", "patient_id"),
@@ -83,7 +83,7 @@ class MatchResultDB(Base):
     distance_miles: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
-    session: Mapped["MatchSessionDB"] = relationship(back_populates="match_results")
+    session: Mapped[MatchSessionDB] = relationship(back_populates="match_results")
 
     __table_args__ = (
         Index("ix_result_session_id", "session_id"),

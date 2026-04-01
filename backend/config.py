@@ -6,7 +6,6 @@ Also accepts ANTHROPIC_API_KEY without prefix for backwards compatibility.
 
 import os
 from functools import lru_cache
-from typing import List
 
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -38,7 +37,7 @@ class Settings(BaseSettings):
     cache_ttl: int = 300
 
     # Server
-    cors_origins: List[str] = ["http://localhost:5173", "http://localhost:3000"]
+    cors_origins: list[str] = ["http://localhost:5173", "http://localhost:3000"]
     log_level: str = "INFO"
     log_format: str = "json"  # "json" or "text"
     environment: str = "development"
