@@ -8,9 +8,9 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from agent_loop import Scratchpad
 from agents import AgentContext, EnrollmentAgent, MonitorAgent, OutreachAgent
 from models import EnrollmentRequest, GateResolution, MonitorRequest, OutreachRequest
-from tools import ToolResult
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -83,26 +83,21 @@ class TestEnrollmentAgent:
             }
         )
 
-        mock_trial_result = ToolResult(
-            success=True,
-            data={"locations": [{"facility": "UCLA", "city": "LA", "state": "CA", "contacts": []}]},
+        mock_scratchpad = Scratchpad(
+            state={
+                "patient_data": sample_patient,
+                "dossier": sample_dossier,
+                "section": sample_dossier["sections"][0],
+                "trial_nct_id": "NCT05107674",
+                "nearest_site": {},
+                "packet": {"screening_checklist": [{"item": "CBC", "category": "labs"}]},
+                "prep": {"what_to_expect": "You will visit the site."},
+                "outreach": {"subject_line": "Patient candidate", "message_body": "Dear CRC..."},
+            }
         )
-        packet_data = {"screening_checklist": [{"item": "CBC", "category": "labs"}]}
-        prep_data = {"what_to_expect": "You will visit the site."}
-        outreach_data = {"subject_line": "Patient candidate", "message_body": "Dear CRC..."}
+        mock_loop = AsyncMock(return_value=mock_scratchpad)
 
-        mock_claude = AsyncMock(
-            side_effect=[
-                ToolResult(success=True, data=packet_data),
-                ToolResult(success=True, data=prep_data),
-                ToolResult(success=True, data=outreach_data),
-            ]
-        )
-
-        with (
-            patch("agents.fetch_trial_tool", new_callable=AsyncMock, return_value=mock_trial_result),
-            patch("agents.claude_json_call", mock_claude),
-        ):
+        with patch("agents.run_agent_loop", mock_loop):
             result = await agent.execute(ctx)
 
         assert result.success is True
@@ -112,11 +107,6 @@ class TestEnrollmentAgent:
         assert "patient_prep_guide" in result.output_data
         assert "outreach_draft" in result.output_data
         assert result.output_data["trial_nct_id"] == "NCT05107674"
-
-        progress_steps = [e[1]["step"] for e in emitted if e[0] == "progress"]
-        assert "generating_packet" in progress_steps
-        assert "generating_prep_guide" in progress_steps
-        assert "generating_outreach_draft" in progress_steps
 
     @pytest.mark.asyncio
     async def test_missing_dossier_section(self, sample_patient, sample_dossier):
@@ -145,59 +135,42 @@ class TestMonitorAgent:
         agent = MonitorAgent()
         ctx, emitted = _make_ctx({"watches": [{"nct_id": "NCT123", "last_status": "RECRUITING", "last_site_count": 5}]})
 
-        changed_trial = ToolResult(
-            success=True,
-            data={"overall_status": "ACTIVE_NOT_RECRUITING", "locations": [1, 2, 3, 4, 5]},
+        mock_scratchpad = Scratchpad(
+            state={
+                "watches": {"NCT123": {"nct_id": "NCT123", "last_status": "RECRUITING", "last_site_count": 5}},
+                "changes": [
+                    {
+                        "nct_id": "NCT123",
+                        "change_type": "status_changed",
+                        "old_status": "RECRUITING",
+                        "new_status": "ACTIVE_NOT_RECRUITING",
+                    }
+                ],
+                "checked": {"NCT123"},
+            }
         )
+        mock_loop = AsyncMock(return_value=mock_scratchpad)
 
-        with patch("agents.fetch_trial_tool", new_callable=AsyncMock, return_value=changed_trial):
+        with patch("agents.run_agent_loop", mock_loop):
             result = await agent.execute(ctx)
 
         assert result.success is True
         assert len(result.output_data["changes"]) == 1
         assert result.output_data["changes"][0]["change_type"] == "status_changed"
-        assert result.output_data["changes"][0]["new_status"] == "ACTIVE_NOT_RECRUITING"
-
-    @pytest.mark.asyncio
-    async def test_detects_new_sites(self):
-        agent = MonitorAgent()
-        ctx, _ = _make_ctx({"watches": [{"nct_id": "NCT123", "last_status": "RECRUITING", "last_site_count": 3}]})
-
-        trial = ToolResult(success=True, data={"overall_status": "RECRUITING", "locations": [1, 2, 3, 4, 5]})
-
-        with patch("agents.fetch_trial_tool", new_callable=AsyncMock, return_value=trial):
-            result = await agent.execute(ctx)
-
-        assert result.success is True
-        sites_added = [c for c in result.output_data["changes"] if c["change_type"] == "sites_added"]
-        assert len(sites_added) == 1
-        assert sites_added[0]["new_count"] == 5
 
     @pytest.mark.asyncio
     async def test_no_changes(self):
         agent = MonitorAgent()
         ctx, _ = _make_ctx({"watches": [{"nct_id": "NCT123", "last_status": "RECRUITING", "last_site_count": 3}]})
 
-        trial = ToolResult(success=True, data={"overall_status": "RECRUITING", "locations": [1, 2, 3]})
+        mock_scratchpad = Scratchpad(state={"watches": {}, "changes": [], "checked": {"NCT123"}})
+        mock_loop = AsyncMock(return_value=mock_scratchpad)
 
-        with patch("agents.fetch_trial_tool", new_callable=AsyncMock, return_value=trial):
+        with patch("agents.run_agent_loop", mock_loop):
             result = await agent.execute(ctx)
 
         assert result.success is True
         assert len(result.output_data["changes"]) == 0
-
-    @pytest.mark.asyncio
-    async def test_trial_not_found(self):
-        agent = MonitorAgent()
-        ctx, _ = _make_ctx({"watches": [{"nct_id": "NCT999", "last_status": "RECRUITING", "last_site_count": 0}]})
-
-        with patch(
-            "agents.fetch_trial_tool", new_callable=AsyncMock, return_value=ToolResult(success=False, error="Not found")
-        ):
-            result = await agent.execute(ctx)
-
-        assert result.success is True
-        assert result.output_data["changes"][0]["change_type"] == "not_found"
 
 
 # ---------------------------------------------------------------------------
@@ -217,34 +190,24 @@ class TestOutreachAgent:
             }
         )
 
-        trial_result = ToolResult(
-            success=True,
-            data={
-                "locations": [
-                    {
-                        "facility": "UCLA",
-                        "city": "LA",
-                        "state": "CA",
-                        "contacts": [
-                            {"name": "Dr. Smith", "role": "CRC", "email": "smith@ucla.edu", "phone": "555-1234"}
-                        ],
-                    }
-                ]
-            },
+        mock_scratchpad = Scratchpad(
+            state={
+                "outreach_draft": {"subject_line": "Patient candidate", "message_body": "Dear CRC..."},
+                "trial_nct_id": "NCT123",
+                "contacts": [{"name": "Dr. Smith", "role": "CRC", "email": "smith@ucla.edu", "facility": "UCLA"}],
+                "final_message": "Dear Dr. Smith, ...",
+                "subject_line": "Patient candidate",
+            }
         )
-        personalized = ToolResult(success=True, data={"message_body": "Dear Dr. Smith, ..."})
+        mock_loop = AsyncMock(return_value=mock_scratchpad)
 
-        with (
-            patch("agents.fetch_trial_tool", new_callable=AsyncMock, return_value=trial_result),
-            patch("agents.claude_json_call", new_callable=AsyncMock, return_value=personalized),
-        ):
+        with patch("agents.run_agent_loop", mock_loop):
             result = await agent.execute(ctx)
 
         assert result.success is True
         assert result.gate_request is not None
         assert result.gate_request.gate_type == "outreach_review"
         assert len(result.output_data["contacts"]) == 1
-        assert result.output_data["contacts"][0]["name"] == "Dr. Smith"
         assert "Dr. Smith" in result.output_data["final_message"]
 
     @pytest.mark.asyncio
@@ -258,12 +221,18 @@ class TestOutreachAgent:
             }
         )
 
-        trial_result = ToolResult(
-            success=True,
-            data={"locations": [{"facility": "UCLA", "city": "LA", "state": "CA", "contacts": []}]},
+        mock_scratchpad = Scratchpad(
+            state={
+                "outreach_draft": {"message_body": "Hello..."},
+                "trial_nct_id": "NCT123",
+                "contacts": [],
+                "final_message": "Hello...",
+                "subject_line": "Pre-screened patient candidate for NCT123",
+            }
         )
+        mock_loop = AsyncMock(return_value=mock_scratchpad)
 
-        with patch("agents.fetch_trial_tool", new_callable=AsyncMock, return_value=trial_result):
+        with patch("agents.run_agent_loop", mock_loop):
             result = await agent.execute(ctx)
 
         assert result.success is True

@@ -120,8 +120,15 @@ def _parse_age_years(age_str: str) -> int | None:
         return None
 
 
-def _cache_key(cancer_type: str, age: int | None, sex: str | None, page_size: int) -> str:
-    return f"{cancer_type}|{age}|{sex}|{page_size}"
+def _cache_key(
+    cancer_type: str,
+    age: int | None,
+    sex: str | None,
+    page_size: int,
+    query_intr: str | None = None,
+    query_term: str | None = None,
+) -> str:
+    return f"{cancer_type}|{age}|{sex}|{page_size}|{query_intr}|{query_term}"
 
 
 def _get_cached(key: str) -> list[dict] | None:
@@ -173,8 +180,10 @@ async def search_trials(
     age: int | None = None,
     sex: str | None = None,
     page_size: int = 10,
+    query_intr: str | None = None,
+    query_term: str | None = None,
 ) -> list[dict]:
-    cache_k = _cache_key(cancer_type, age, sex, page_size)
+    cache_k = _cache_key(cancer_type, age, sex, page_size, query_intr, query_term)
     cached = _get_cached(cache_k)
     if cached is not None:
         return cached
@@ -185,6 +194,10 @@ async def search_trials(
         "fields": FIELDS,
         "pageSize": min(page_size, 100),
     }
+    if query_intr:
+        params["query.intr"] = query_intr
+    if query_term:
+        params["query.term"] = query_term
 
     resp = await _http_get_with_retry(f"{BASE_URL}/studies", params)
     try:

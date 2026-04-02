@@ -32,6 +32,11 @@ class Settings(BaseSettings):
     dossier_top_n: int = 3
     dossier_max_concurrent: int = 3
 
+    # Agent loop (adaptive matching)
+    agent_max_iterations: int = 5
+    agent_max_search_calls: int = 3
+    agent_max_analysis_calls: int = 20
+
     # Evaluator-optimizer loop
     evaluation_enabled: bool = True
     evaluation_score_min: int = 30  # Lower bound: below this is clearly poor, skip evaluation

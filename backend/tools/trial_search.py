@@ -19,10 +19,12 @@ async def search_trials_tool(
     age: int | None = None,
     sex: str | None = None,
     page_size: int = 10,
+    query_intr: str | None = None,
+    query_term: str | None = None,
 ) -> ToolResult:
     """Search ClinicalTrials.gov for recruiting trials matching criteria."""
     try:
-        trials = await search_trials(cancer_type, age, sex, page_size)
+        trials = await search_trials(cancer_type, age, sex, page_size, query_intr=query_intr, query_term=query_term)
         return ToolResult(success=True, data=trials)
     except Exception as e:
         logger.error("tool.search_trials_failed", error=str(e))

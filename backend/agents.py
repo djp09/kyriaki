@@ -1,14 +1,13 @@
-"""Agent definitions — thin orchestrators in the WAT framework.
+"""Agent definitions — adaptive orchestrators using the ReAct loop.
 
-Each agent reads its workflow SOP (workflows/*.md), calls tools in sequence,
-handles concurrency, and returns results. The actual work happens in tools/.
+Each agent provides:
+- An orchestrator prompt (domain-specific reasoning strategy)
+- Action handlers (map decisions to tool calls)
+- A result builder (assembles final output from scratchpad)
 
-Workflow SOPs:
-  - workflows/matching.md
-  - workflows/dossier.md
-  - workflows/enrollment.md
-  - workflows/outreach.md
-  - workflows/monitor.md
+The agent_loop.py engine handles the plan→act→observe cycle.
+
+Workflow SOPs in workflows/*.md document each agent's strategy.
 """
 
 from __future__ import annotations
@@ -22,6 +21,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, ClassVar
 
+from agent_loop import AgentBudget, AgentDecision, Scratchpad, run_agent_loop
 from config import get_settings
 from dispatcher import register_agent
 from logging_config import get_logger
@@ -32,6 +32,13 @@ from models import (
     MonitorInput,
     OutreachInput,
     PatientProfile,
+)
+from prompts import (
+    DOSSIER_ORCHESTRATOR_PROMPT,
+    ENROLLMENT_ORCHESTRATOR_PROMPT,
+    MATCHING_ORCHESTRATOR_PROMPT,
+    MONITOR_ORCHESTRATOR_PROMPT,
+    OUTREACH_ORCHESTRATOR_PROMPT,
 )
 from tools.claude_api import (
     claude_json_call,
@@ -93,15 +100,17 @@ class BaseAgent(ABC):
     async def execute(self, ctx: AgentContext) -> AgentResult: ...
 
 
-# --- Concrete agents ---
-# Each agent follows its workflow SOP in workflows/*.md
+# ---------------------------------------------------------------------------
+# MatchingAgent — adaptive trial search and analysis
+# ---------------------------------------------------------------------------
 
 
 @register_agent
 class MatchingAgent(BaseAgent):
-    """Workflow: workflows/matching.md
+    """Adaptive agent: plans search strategy, analyzes, refines, and self-corrects.
 
-    Search → Analyze (parallel) → Filter by distance → Rank → Return top N.
+    Uses the ReAct loop with domain-specific search strategies.
+    Workflow: workflows/matching.md
     """
 
     agent_type: ClassVar[str] = "matching"
@@ -116,34 +125,47 @@ class MatchingAgent(BaseAgent):
         max_results = inputs.max_results
         settings = get_settings()
 
-        # Step 1: Search trials
-        await ctx.emit("progress", {"step": "searching_trials"})
-        candidate_count = min(max(max_results * 2, 6), settings.default_page_size)
-        search_result = await search_trials_tool(
-            cancer_type=patient.cancer_type,
-            age=patient.age,
-            sex=patient.sex,
-            page_size=candidate_count,
-        )
-        if not search_result.success:
-            return AgentResult(success=False, error=f"Trial search failed: {search_result.error}")
-        trials = search_result.data
-        total = len(trials)
-
-        # Steps 2+3: Patient summary + eligibility analysis (concurrent)
+        # Patient summary runs concurrently with the agent loop
         summary_task = asyncio.create_task(self._generate_summary(patient))
-        analyses = await self._analyze_all(patient, trials, ctx, settings)
 
-        # Step 3.5: Evaluator-optimizer loop on borderline scores
-        if settings.evaluation_enabled:
-            analyses = await self._evaluate_borderline(patient, analyses, ctx, settings)
+        # Build prompt variables from patient profile
+        patient_vars = format_patient_for_prompt(patient)
+        prompt_vars = {
+            **patient_vars,
+            "location_zip": patient.location_zip,
+            "willing_to_travel_miles": patient.willing_to_travel_miles,
+        }
 
-        # Step 4+5: Build matches, filter by distance, rank, trim
-        matches = self._build_matches(patient, trials, analyses)
-        matches.sort(key=lambda m: m.match_score, reverse=True)
-        matches = matches[:max_results]
+        # Agent-specific state stored in scratchpad
+        scratchpad = Scratchpad(
+            state={
+                "patient": patient,
+                "max_results": max_results,
+                "trials_pool": {},  # nct_id → trial dict (deduplicated)
+                "analyses": {},  # nct_id → analysis dict
+                "settings": settings,
+            }
+        )
 
+        # Define action handlers
+        handlers = {
+            "search": self._handle_search,
+            "analyze_batch": self._handle_analyze_batch,
+            "evaluate": self._handle_evaluate,
+        }
+
+        # Run the adaptive loop
+        scratchpad = await run_agent_loop(
+            orchestrator_prompt_template=MATCHING_ORCHESTRATOR_PROMPT,
+            prompt_vars=prompt_vars,
+            action_handlers=handlers,
+            scratchpad=scratchpad,
+            emit=ctx.emit,
+        )
+
+        # Build final result from scratchpad state
         patient_summary = await summary_task
+        matches = self._build_final_matches(scratchpad, patient, max_results)
         matches_data = [m.model_dump() for m in matches]
 
         return AgentResult(
@@ -151,56 +173,142 @@ class MatchingAgent(BaseAgent):
             output_data={
                 "patient_summary": patient_summary,
                 "matches": matches_data,
-                "total_trials_screened": total,
+                "total_trials_screened": len(scratchpad.state.get("trials_pool", {})),
             },
         )
 
-    async def _generate_summary(self, patient: PatientProfile) -> str:
-        """Step 2: Render prompt → call Claude for patient summary."""
-        patient_vars = format_patient_for_prompt(patient)
-        prompt_result = render_prompt(prompt_name="patient_summary", **patient_vars)
-        if not prompt_result.success:
-            return self._fallback_summary(patient)
+    async def _handle_search(
+        self, decision: AgentDecision, scratchpad: Scratchpad, budget: AgentBudget
+    ) -> tuple[str, bool]:
+        """Handle a search action — query ClinicalTrials.gov."""
+        if budget.searches_remaining <= 0:
+            return "Search budget exhausted", False
 
-        result = await claude_text_call(prompt_result.data)
+        patient = scratchpad.state["patient"]
+        params = decision.params
+        result = await search_trials_tool(
+            cancer_type=params.get("query_cond", patient.cancer_type),
+            age=patient.age,
+            sex=patient.sex,
+            page_size=params.get("page_size", 20),
+            query_intr=params.get("query_intr"),
+            query_term=params.get("query_term"),
+        )
+        budget.search_calls_used += 1
+
         if not result.success:
-            return self._fallback_summary(patient)
-        return result.data
+            return f"Search failed: {result.error}", False
 
-    def _fallback_summary(self, patient: PatientProfile) -> str:
-        treatments_str = ", ".join(patient.prior_treatments) if patient.prior_treatments else None
-        biomarkers_str = ", ".join(patient.biomarkers) if patient.biomarkers else None
+        # Deduplicate into trials pool
+        pool = scratchpad.state["trials_pool"]
+        new_count = 0
+        for trial in result.data:
+            nct_id = trial["nct_id"]
+            if nct_id not in pool:
+                pool[nct_id] = trial
+                new_count += 1
 
-        summary = f"You are a {patient.age}-year-old navigating {patient.cancer_stage} {patient.cancer_type}."
-        if treatments_str:
-            summary += (
-                f" You have been through {patient.lines_of_therapy} line(s) of treatment including {treatments_str}."
-            )
-        if biomarkers_str:
-            summary += f" Your biomarker profile includes {biomarkers_str}."
-        summary += " We are searching for clinical trials that may be a good fit for your specific situation."
-        return summary
+        total = len(pool)
+        return f"Found {len(result.data)} trials ({new_count} new, {total} total in pool)", True
 
-    async def _analyze_all(
-        self, patient: PatientProfile, trials: list[dict], ctx: AgentContext, settings
-    ) -> list[tuple[dict, dict | None]]:
-        """Step 3: Parallel eligibility analysis with semaphore."""
+    async def _handle_analyze_batch(
+        self, decision: AgentDecision, scratchpad: Scratchpad, budget: AgentBudget
+    ) -> tuple[str, bool]:
+        """Handle analyze_batch — run eligibility analysis on unanalyzed trials."""
+        pool = scratchpad.state["trials_pool"]
+        analyses = scratchpad.state["analyses"]
+        patient = scratchpad.state["patient"]
+        settings = scratchpad.state["settings"]
+
+        # Find unanalyzed trials
+        unanalyzed = {nct_id: trial for nct_id, trial in pool.items() if nct_id not in analyses}
+        if not unanalyzed:
+            return "No unanalyzed trials in pool", False
+
+        # Respect budget
+        to_analyze = list(unanalyzed.values())[: budget.analyses_remaining]
+        if not to_analyze:
+            return "Analysis budget exhausted", False
+
         semaphore = asyncio.Semaphore(settings.max_concurrent_analyses)
 
-        async def analyze_one(trial: dict, index: int) -> tuple[dict, dict | None]:
+        async def analyze_one(trial: dict) -> tuple[str, dict | None]:
             async with semaphore:
-                return trial, await self._analyze_trial(patient, trial, index, len(trials), settings)
+                result = await self._analyze_single_trial(patient, trial, settings)
+                return trial["nct_id"], result
 
-        results = await asyncio.gather(*[analyze_one(t, i + 1) for i, t in enumerate(trials)])
-        return list(results)
+        results = await asyncio.gather(*[analyze_one(t) for t in to_analyze])
+        budget.analysis_calls_used += len(to_analyze)
 
-    async def _analyze_trial(
-        self, patient: PatientProfile, trial: dict, trial_index: int, total: int, settings
-    ) -> dict | None:
-        """Render prompt → call Claude → parse JSON for a single trial."""
+        scored = 0
+        high_scores = 0
+        for nct_id, analysis in results:
+            if analysis is not None:
+                analyses[nct_id] = analysis
+                scored += 1
+                if analysis.get("match_score", 0) >= 60:
+                    high_scores += 1
+
+        scores = [a.get("match_score", 0) for a in analyses.values()]
+        score_summary = ""
+        if scores:
+            score_summary = f" Scores: min={min(scores)}, max={max(scores)}, ≥60: {high_scores}"
+
+        return f"Analyzed {len(to_analyze)} trials, {scored} scored.{score_summary}", True
+
+    async def _handle_evaluate(
+        self, decision: AgentDecision, scratchpad: Scratchpad, budget: AgentBudget
+    ) -> tuple[str, bool]:
+        """Handle evaluate — re-evaluate borderline scores."""
+        analyses = scratchpad.state["analyses"]
+        pool = scratchpad.state["trials_pool"]
+        patient = scratchpad.state["patient"]
+        settings = scratchpad.state["settings"]
+
+        patient_vars = format_patient_for_prompt(patient)
+        borderline = [
+            (nct_id, analysis)
+            for nct_id, analysis in analyses.items()
+            if settings.evaluation_score_min <= analysis.get("match_score", 0) <= settings.evaluation_score_max
+        ]
+
+        if not borderline:
+            return "No borderline scores to evaluate", True
+
+        adjusted_count = 0
+        for nct_id, analysis in borderline:
+            trial = pool[nct_id]
+            eligibility_text = trial["eligibility_criteria"][:6000]
+
+            criteria = []
+            for ev in analysis.get("inclusion_evaluations", []):
+                criteria.append({"type": "inclusion", **ev})
+            for ev in analysis.get("exclusion_evaluations", []):
+                criteria.append({"type": "exclusion", **ev})
+
+            result = await evaluate_score(
+                patient_vars=patient_vars,
+                nct_id=nct_id,
+                brief_title=trial["brief_title"],
+                eligibility_criteria=eligibility_text,
+                initial_score=analysis.get("match_score", 0),
+                initial_explanation=analysis.get("match_explanation", ""),
+                criteria_json=json.dumps(criteria, indent=2),
+            )
+
+            if result.success and not result.data["confirmed"] and result.data["adjusted_score"] is not None:
+                old = analysis["match_score"]
+                analysis["match_score"] = result.data["adjusted_score"]
+                analysis.setdefault("flags_for_oncologist", []).append(
+                    f"Score adjusted from {old} to {result.data['adjusted_score']}: {result.data['adjustment_reason']}"
+                )
+                adjusted_count += 1
+
+        return f"Evaluated {len(borderline)} borderline scores, adjusted {adjusted_count}", True
+
+    async def _analyze_single_trial(self, patient: PatientProfile, trial: dict, settings) -> dict | None:
+        """Analyze a single trial's eligibility — same logic as before."""
         nct_id = trial["nct_id"]
-        logger.info("trial.analyze_start", nct_id=nct_id, title=trial["brief_title"][:60])
-
         eligibility_text = trial["eligibility_criteria"]
         if len(eligibility_text) > 6000:
             eligibility_text = (
@@ -218,7 +326,6 @@ class MatchingAgent(BaseAgent):
             eligibility_criteria=eligibility_text,
         )
         if not prompt_result.success:
-            logger.error("trial.prompt_render_failed", nct_id=nct_id, error=prompt_result.error)
             return None
 
         for attempt in range(settings.max_retries + 1):
@@ -231,139 +338,80 @@ class MatchingAgent(BaseAgent):
                 )
                 text = response.content[0].text.strip()
                 result = parse_json_response(text)
-
                 if result is not None:
                     if "match_score" not in result:
                         result["match_score"] = 0
-                    logger.info("trial.analyze_complete", nct_id=nct_id, score=result["match_score"])
                     return result
-
                 if attempt < settings.max_retries:
-                    logger.warning("trial.parse_failed", nct_id=nct_id, attempt=attempt + 1)
                     continue
-
-                logger.error("trial.parse_exhausted", nct_id=nct_id, attempts=settings.max_retries + 1)
                 return extract_minimal_result(text, nct_id)
-
-            except Exception as e:
+            except Exception:
                 if attempt < settings.max_retries:
-                    logger.warning("trial.analyze_error", nct_id=nct_id, error=str(e), attempt=attempt + 1)
                     continue
-                logger.error("trial.analyze_failed", nct_id=nct_id, error=str(e))
                 return None
-
         return None
 
-    async def _evaluate_borderline(
-        self, patient: PatientProfile, analyses: list[tuple[dict, dict | None]], ctx: AgentContext, settings
-    ) -> list[tuple[dict, dict | None]]:
-        """Step 3.5: Re-evaluate borderline scores (evaluator-optimizer pattern).
-
-        Scores between evaluation_score_min and evaluation_score_max get a second
-        evaluation pass to catch scoring errors, logical inconsistencies, and
-        missed disqualifiers.
-        """
-        patient_vars = format_patient_for_prompt(patient)
-        borderline = []
-        for i, (trial, analysis) in enumerate(analyses):
-            if analysis is None:
-                continue
-            score = analysis.get("match_score", 0)
-            if settings.evaluation_score_min <= score <= settings.evaluation_score_max:
-                borderline.append((i, trial, analysis))
-
-        if not borderline:
-            return analyses
-
-        await ctx.emit("progress", {"step": "evaluating_borderline", "count": len(borderline)})
-        logger.info("eval.borderline_start", count=len(borderline))
-
-        semaphore = asyncio.Semaphore(settings.max_concurrent_analyses)
-
-        async def eval_one(idx: int, trial: dict, analysis: dict) -> tuple[int, dict]:
-            async with semaphore:
-                eligibility_text = trial["eligibility_criteria"]
-                if len(eligibility_text) > 6000:
-                    eligibility_text = eligibility_text[:6000]
-
-                # Build criteria JSON from the initial evaluations
-                criteria = []
-                for ev in analysis.get("inclusion_evaluations", []):
-                    criteria.append({"type": "inclusion", **ev})
-                for ev in analysis.get("exclusion_evaluations", []):
-                    criteria.append({"type": "exclusion", **ev})
-
-                result = await evaluate_score(
-                    patient_vars=patient_vars,
-                    nct_id=trial["nct_id"],
-                    brief_title=trial["brief_title"],
-                    eligibility_criteria=eligibility_text,
-                    initial_score=analysis.get("match_score", 0),
-                    initial_explanation=analysis.get("match_explanation", ""),
-                    criteria_json=json.dumps(criteria, indent=2),
-                )
-                return idx, result
-
-        eval_results = await asyncio.gather(*[eval_one(i, t, a) for i, t, a in borderline])
-
-        # Apply adjustments
-        updated = list(analyses)
-        for idx, result in eval_results:
-            if not result.success:
-                logger.warning("eval.failed", nct_id=analyses[idx][0]["nct_id"], error=result.error)
-                continue
-
-            data = result.data
-            trial, analysis = updated[idx]
-            nct_id = trial["nct_id"]
-
-            if not data["confirmed"] and data["adjusted_score"] is not None:
-                old_score = analysis["match_score"]
-                analysis["match_score"] = data["adjusted_score"]
-                analysis.setdefault("flags_for_oncologist", []).append(
-                    f"Score adjusted from {old_score} to {data['adjusted_score']}: {data['adjustment_reason']}"
-                )
-                logger.info(
-                    "eval.adjusted",
-                    nct_id=nct_id,
-                    old_score=old_score,
-                    new_score=data["adjusted_score"],
-                    reason=data["adjustment_reason"],
-                )
-            else:
-                logger.info("eval.confirmed", nct_id=nct_id, score=analysis["match_score"])
-
-        return updated
-
-    def _build_matches(self, patient, trials, analyses):
-        """Step 4: Build TrialMatch objects, handling all-failed fallback."""
+    def _build_final_matches(self, scratchpad: Scratchpad, patient: PatientProfile, max_results: int):
+        """Build ranked TrialMatch list from scratchpad state."""
         from models import TrialMatch
 
-        all_failed = all(analysis is None for _, analysis in analyses)
+        pool = scratchpad.state.get("trials_pool", {})
+        analyses = scratchpad.state.get("analyses", {})
         matches: list[TrialMatch] = []
 
-        if all_failed and trials:
-            logger.warning("match.all_analyses_failed", fallback="unscored")
-            for trial, _ in analyses:
+        if not analyses and pool:
+            # All analyses failed — return unscored matches
+            for trial in pool.values():
                 match = build_unscored_match(trial, patient)
                 if match.distance_miles is None or match.distance_miles <= patient.willing_to_travel_miles:
                     matches.append(match)
         else:
-            for trial, analysis in analyses:
-                if analysis is None:
+            for nct_id, analysis in analyses.items():
+                trial = pool.get(nct_id)
+                if trial is None:
                     continue
                 match = build_scored_match(trial, analysis, patient)
                 if match is not None:
                     matches.append(match)
 
-        return matches
+        matches.sort(key=lambda m: m.match_score, reverse=True)
+        return matches[:max_results]
+
+    async def _generate_summary(self, patient: PatientProfile) -> str:
+        """Generate patient summary (runs concurrently with agent loop)."""
+        patient_vars = format_patient_for_prompt(patient)
+        prompt_result = render_prompt(prompt_name="patient_summary", **patient_vars)
+        if not prompt_result.success:
+            return self._fallback_summary(patient)
+        result = await claude_text_call(prompt_result.data)
+        if not result.success:
+            return self._fallback_summary(patient)
+        return result.data
+
+    def _fallback_summary(self, patient: PatientProfile) -> str:
+        treatments_str = ", ".join(patient.prior_treatments) if patient.prior_treatments else None
+        biomarkers_str = ", ".join(patient.biomarkers) if patient.biomarkers else None
+        summary = f"You are a {patient.age}-year-old navigating {patient.cancer_stage} {patient.cancer_type}."
+        if treatments_str:
+            summary += (
+                f" You have been through {patient.lines_of_therapy} line(s) of treatment including {treatments_str}."
+            )
+        if biomarkers_str:
+            summary += f" Your biomarker profile includes {biomarkers_str}."
+        summary += " We are searching for clinical trials that may be a good fit for your specific situation."
+        return summary
+
+
+# ---------------------------------------------------------------------------
+# DossierAgent — adaptive deep analysis
+# ---------------------------------------------------------------------------
 
 
 @register_agent
 class DossierAgent(BaseAgent):
-    """Workflow: workflows/dossier.md
+    """Adaptive agent: reasons about which trials need deeper investigation.
 
-    Select top N → Deep Opus analysis (parallel) → Assemble dossier → Human gate.
+    Workflow: workflows/dossier.md
     """
 
     agent_type: ClassVar[str] = "dossier"
@@ -374,60 +422,78 @@ class DossierAgent(BaseAgent):
         except Exception as e:
             return AgentResult(success=False, error=f"Invalid input: {e}")
 
-        patient_data = inputs.patient
-        matches = inputs.matches
         settings = get_settings()
         top_n = inputs.top_n or settings.dossier_top_n
+        top_matches = sorted(inputs.matches, key=lambda m: m.get("match_score", 0), reverse=True)[:top_n]
 
-        # Step 1: Select top matches
-        top_matches = sorted(matches, key=lambda m: m.get("match_score", 0), reverse=True)[:top_n]
-        await ctx.emit("progress", {"step": "deep_analysis", "trial_count": len(top_matches)})
+        matches_summary = "\n".join(
+            f"- {m['nct_id']}: {m.get('brief_title', '?')[:60]} (score: {m.get('match_score', '?')})"
+            for m in top_matches
+        )
 
-        # Step 2: Deep analysis (concurrent)
-        semaphore = asyncio.Semaphore(settings.dossier_max_concurrent)
+        scratchpad = Scratchpad(
+            state={
+                "patient_data": inputs.patient,
+                "matches": {m["nct_id"]: m for m in top_matches},
+                "sections": {},
+                "settings": settings,
+            }
+        )
 
-        async def analyze_one(i: int, match: dict) -> dict:
-            async with semaphore:
-                await ctx.emit(
-                    "progress",
-                    {
-                        "step": "analyzing_trial",
-                        "trial_index": i + 1,
-                        "total": len(top_matches),
-                        "nct_id": match["nct_id"],
-                    },
-                )
-                return await self._deep_analyze(patient_data, match, settings)
+        handlers = {
+            "deep_analyze": self._handle_deep_analyze,
+            "investigate_criterion": self._handle_investigate,
+        }
 
-        sections = await asyncio.gather(*[analyze_one(i, m) for i, m in enumerate(top_matches)])
+        scratchpad = await run_agent_loop(
+            orchestrator_prompt_template=DOSSIER_ORCHESTRATOR_PROMPT,
+            prompt_vars={
+                "patient_json": json.dumps(inputs.patient, indent=2),
+                "matches_summary": matches_summary,
+            },
+            action_handlers=handlers,
+            scratchpad=scratchpad,
+            emit=ctx.emit,
+        )
 
-        # Step 3: Assemble dossier
+        # Assemble dossier from completed analyses
+        sections = list(scratchpad.state.get("sections", {}).values())
         dossier = {
             "patient_summary": ctx.input_data.get("patient_summary", ""),
             "generated_at": datetime.now(timezone.utc).isoformat(),
-            "sections": list(sections),
+            "sections": sections,
         }
 
-        # Step 4: Request human gate
         return AgentResult(
             success=True,
             output_data={"dossier": dossier},
             gate_request=GateRequest(gate_type="dossier_review", requested_data={"dossier": dossier}),
         )
 
-    async def _deep_analyze(self, patient_data: dict, match: dict, settings) -> dict:
-        """Render prompt → Claude Opus → build dossier section."""
+    async def _handle_deep_analyze(
+        self, decision: AgentDecision, scratchpad: Scratchpad, budget: AgentBudget
+    ) -> tuple[str, bool]:
+        nct_id = decision.params.get("nct_id", "")
+        match = scratchpad.state["matches"].get(nct_id)
+        if not match:
+            return f"Trial {nct_id} not in top matches", False
+
+        settings = scratchpad.state["settings"]
+        patient_data = scratchpad.state["patient_data"]
+
         prompt_result = render_prompt(
             prompt_name="dossier_analysis",
             patient_json=json.dumps(patient_data, indent=2),
-            nct_id=match["nct_id"],
+            nct_id=nct_id,
             brief_title=match["brief_title"],
             eligibility_criteria=match.get("eligibility_criteria", "Not available"),
             initial_score=match.get("match_score", 0),
             initial_explanation=match.get("match_explanation", ""),
         )
         if not prompt_result.success:
-            return build_dossier_section(match, None)
+            section = build_dossier_section(match, None)
+            scratchpad.state["sections"][nct_id] = section
+            return f"Prompt failed for {nct_id}, recorded error section", False
 
         result = await claude_json_call(
             prompt_result.data,
@@ -435,14 +501,36 @@ class DossierAgent(BaseAgent):
             max_tokens=settings.dossier_max_tokens,
         )
 
-        return build_dossier_section(match, result.data if result.success else None)
+        section = build_dossier_section(match, result.data if result.success else None)
+        scratchpad.state["sections"][nct_id] = section
+
+        revised = section.get("revised_score", "?")
+        return f"Deep analysis of {nct_id}: revised score {revised}", True
+
+    async def _handle_investigate(
+        self, decision: AgentDecision, scratchpad: Scratchpad, budget: AgentBudget
+    ) -> tuple[str, bool]:
+        nct_id = decision.params.get("nct_id", "")
+        question = decision.params.get("question", "")
+        trial_result = await fetch_trial_tool(nct_id=nct_id)
+        if not trial_result.success:
+            return f"Could not fetch {nct_id}: {trial_result.error}", False
+        return (
+            f"Fetched fresh data for {nct_id}. Question: {question}. Trial has {len(trial_result.data.get('locations', []))} sites.",
+            True,
+        )
+
+
+# ---------------------------------------------------------------------------
+# EnrollmentAgent — adaptive packet generation
+# ---------------------------------------------------------------------------
 
 
 @register_agent
 class EnrollmentAgent(BaseAgent):
-    """Workflow: workflows/enrollment.md
+    """Adaptive agent: strategizes enrollment packet creation.
 
-    Locate section → Fetch trial → Generate packet → Prep guide → Outreach draft → Human gate.
+    Workflow: workflows/enrollment.md
     """
 
     agent_type: ClassVar[str] = "enrollment"
@@ -453,83 +541,50 @@ class EnrollmentAgent(BaseAgent):
         except Exception as e:
             return AgentResult(success=False, error=f"Invalid input: {e}")
 
-        patient_data = inputs.patient
         dossier = inputs.dossier
         trial_nct_id = inputs.trial_nct_id
-
-        # Step 1: Locate dossier section
         section = next((s for s in dossier.get("sections", []) if s.get("nct_id") == trial_nct_id), None)
         if not section:
             return AgentResult(success=False, error=f"No dossier section found for {trial_nct_id}")
 
-        # Step 2: Fetch fresh trial data
-        trial_result = await fetch_trial_tool(nct_id=trial_nct_id)
-        nearest_site = {}
-        if trial_result.success and trial_result.data.get("locations"):
-            nearest_site = trial_result.data["locations"][0]
-
-        # Step 3: Generate enrollment packet
-        await ctx.emit("progress", {"step": "generating_packet"})
-        packet_prompt = render_prompt(
-            prompt_name="enrollment_packet",
-            patient_json=json.dumps(patient_data, indent=2),
-            nct_id=trial_nct_id,
-            brief_title=section.get("brief_title", ""),
-            revised_score=section.get("revised_score", "?"),
-            clinical_summary=section.get("clinical_summary", ""),
-            criteria_json=json.dumps(section.get("criteria_analysis", [])[:10], indent=2),
+        scratchpad = Scratchpad(
+            state={
+                "patient_data": inputs.patient,
+                "dossier": dossier,
+                "section": section,
+                "trial_nct_id": trial_nct_id,
+                "nearest_site": {},
+                "packet": None,
+                "prep": None,
+                "outreach": None,
+            }
         )
-        packet = None
-        if packet_prompt.success:
-            packet_result = await claude_json_call(packet_prompt.data)
-            packet = packet_result.data if packet_result.success else None
 
-        # Step 4: Generate patient prep guide
-        await ctx.emit("progress", {"step": "generating_prep_guide"})
-        prep_prompt = render_prompt(
-            prompt_name="patient_prep",
-            cancer_type=patient_data.get("cancer_type", ""),
-            cancer_stage=patient_data.get("cancer_stage", ""),
-            age=patient_data.get("age", ""),
-            brief_title=section.get("brief_title", ""),
-            site_name=nearest_site.get("facility", "Trial site"),
-            site_city=nearest_site.get("city", ""),
-            site_state=nearest_site.get("state", ""),
-            screening_checklist=json.dumps((packet or {}).get("screening_checklist", []), indent=2),
+        handlers = {
+            "fetch_site_info": self._handle_fetch_site,
+            "generate_packet": self._handle_generate_packet,
+            "generate_prep_guide": self._handle_generate_prep,
+            "generate_outreach": self._handle_generate_outreach,
+        }
+
+        scratchpad = await run_agent_loop(
+            orchestrator_prompt_template=ENROLLMENT_ORCHESTRATOR_PROMPT,
+            prompt_vars={
+                "patient_summary": section.get("clinical_summary", dossier.get("patient_summary", "")),
+                "nct_id": trial_nct_id,
+                "brief_title": section.get("brief_title", ""),
+                "revised_score": section.get("revised_score", "?"),
+            },
+            action_handlers=handlers,
+            scratchpad=scratchpad,
+            emit=ctx.emit,
         )
-        prep = None
-        if prep_prompt.success:
-            prep_result = await claude_json_call(prep_prompt.data)
-            prep = prep_result.data if prep_result.success else None
 
-        # Step 5: Generate outreach draft
-        await ctx.emit("progress", {"step": "generating_outreach_draft"})
-        contact_name = "Research Coordinator"
-        if nearest_site.get("contacts"):
-            contact_name = nearest_site["contacts"][0].get("name", "Research Coordinator")
-
-        outreach_prompt = render_prompt(
-            prompt_name="outreach_message",
-            nct_id=trial_nct_id,
-            brief_title=section.get("brief_title", ""),
-            site_name=nearest_site.get("facility", "Trial site"),
-            site_city=nearest_site.get("city", ""),
-            site_state=nearest_site.get("state", ""),
-            contact_name=contact_name,
-            patient_summary=section.get("clinical_summary", dossier.get("patient_summary", "")),
-            match_score=section.get("revised_score", "?"),
-            match_rationale=section.get("score_justification", ""),
-        )
-        outreach = None
-        if outreach_prompt.success:
-            outreach_result = await claude_json_call(outreach_prompt.data)
-            outreach = outreach_result.data if outreach_result.success else None
-
-        # Step 6: Request human gate
+        state = scratchpad.state
         output = {
-            "patient_packet": packet or {"error": "Failed to generate"},
-            "patient_prep_guide": prep or {"error": "Failed to generate"},
-            "outreach_draft": outreach or {"error": "Failed to generate"},
+            "patient_packet": state.get("packet") or {"error": "Failed to generate"},
+            "patient_prep_guide": state.get("prep") or {"error": "Failed to generate"},
+            "outreach_draft": state.get("outreach") or {"error": "Failed to generate"},
             "trial_nct_id": trial_nct_id,
             "trial_title": section.get("brief_title", ""),
         }
@@ -540,12 +595,199 @@ class EnrollmentAgent(BaseAgent):
             gate_request=GateRequest(gate_type="enrollment_review", requested_data=output),
         )
 
+    async def _handle_fetch_site(
+        self, decision: AgentDecision, scratchpad: Scratchpad, budget: AgentBudget
+    ) -> tuple[str, bool]:
+        nct_id = decision.params.get("nct_id", scratchpad.state["trial_nct_id"])
+        result = await fetch_trial_tool(nct_id=nct_id)
+        if not result.success:
+            return f"Could not fetch trial: {result.error}", False
+        locations = result.data.get("locations", [])
+        if locations:
+            scratchpad.state["nearest_site"] = locations[0]
+        contacts_count = sum(len(loc.get("contacts", [])) for loc in locations[:5])
+        return f"Fetched {nct_id}: {len(locations)} sites, {contacts_count} contacts", True
+
+    async def _handle_generate_packet(
+        self, decision: AgentDecision, scratchpad: Scratchpad, budget: AgentBudget
+    ) -> tuple[str, bool]:
+        state = scratchpad.state
+        prompt_result = render_prompt(
+            prompt_name="enrollment_packet",
+            patient_json=json.dumps(state["patient_data"], indent=2),
+            nct_id=state["trial_nct_id"],
+            brief_title=state["section"].get("brief_title", ""),
+            revised_score=state["section"].get("revised_score", "?"),
+            clinical_summary=state["section"].get("clinical_summary", ""),
+            criteria_json=json.dumps(state["section"].get("criteria_analysis", [])[:10], indent=2),
+        )
+        if not prompt_result.success:
+            return f"Prompt failed: {prompt_result.error}", False
+        result = await claude_json_call(prompt_result.data)
+        if result.success:
+            state["packet"] = result.data
+            items = len(result.data.get("screening_checklist", []))
+            return f"Generated packet with {items} screening items", True
+        return "Failed to generate packet", False
+
+    async def _handle_generate_prep(
+        self, decision: AgentDecision, scratchpad: Scratchpad, budget: AgentBudget
+    ) -> tuple[str, bool]:
+        state = scratchpad.state
+        site = state.get("nearest_site", {})
+        prompt_result = render_prompt(
+            prompt_name="patient_prep",
+            cancer_type=state["patient_data"].get("cancer_type", ""),
+            cancer_stage=state["patient_data"].get("cancer_stage", ""),
+            age=state["patient_data"].get("age", ""),
+            brief_title=state["section"].get("brief_title", ""),
+            site_name=site.get("facility", "Trial site"),
+            site_city=site.get("city", ""),
+            site_state=site.get("state", ""),
+            screening_checklist=json.dumps((state.get("packet") or {}).get("screening_checklist", []), indent=2),
+        )
+        if not prompt_result.success:
+            return f"Prompt failed: {prompt_result.error}", False
+        result = await claude_json_call(prompt_result.data)
+        if result.success:
+            state["prep"] = result.data
+            return "Generated patient prep guide", True
+        return "Failed to generate prep guide", False
+
+    async def _handle_generate_outreach(
+        self, decision: AgentDecision, scratchpad: Scratchpad, budget: AgentBudget
+    ) -> tuple[str, bool]:
+        state = scratchpad.state
+        site = state.get("nearest_site", {})
+        contact_name = "Research Coordinator"
+        if site.get("contacts"):
+            contact_name = site["contacts"][0].get("name", "Research Coordinator")
+
+        prompt_result = render_prompt(
+            prompt_name="outreach_message",
+            nct_id=state["trial_nct_id"],
+            brief_title=state["section"].get("brief_title", ""),
+            site_name=site.get("facility", "Trial site"),
+            site_city=site.get("city", ""),
+            site_state=site.get("state", ""),
+            contact_name=contact_name,
+            patient_summary=state["section"].get("clinical_summary", state["dossier"].get("patient_summary", "")),
+            match_score=state["section"].get("revised_score", "?"),
+            match_rationale=state["section"].get("score_justification", ""),
+        )
+        if not prompt_result.success:
+            return f"Prompt failed: {prompt_result.error}", False
+        result = await claude_json_call(prompt_result.data)
+        if result.success:
+            state["outreach"] = result.data
+            return "Generated outreach draft", True
+        return "Failed to generate outreach", False
+
+
+# ---------------------------------------------------------------------------
+# OutreachAgent — adaptive contact extraction and personalization
+# ---------------------------------------------------------------------------
+
+
+@register_agent
+class OutreachAgent(BaseAgent):
+    """Adaptive agent: strategizes outreach personalization.
+
+    Workflow: workflows/outreach.md
+    """
+
+    agent_type: ClassVar[str] = "outreach"
+
+    async def execute(self, ctx: AgentContext) -> AgentResult:
+        try:
+            inputs = OutreachInput(**ctx.input_data)
+        except Exception as e:
+            return AgentResult(success=False, error=f"Invalid input: {e}")
+
+        scratchpad = Scratchpad(
+            state={
+                "outreach_draft": inputs.outreach_draft,
+                "trial_nct_id": inputs.trial_nct_id,
+                "contacts": [],
+                "final_message": inputs.outreach_draft.get("message_body", ""),
+                "subject_line": inputs.outreach_draft.get(
+                    "subject_line", f"Pre-screened patient candidate for {inputs.trial_nct_id}"
+                ),
+            }
+        )
+
+        handlers = {
+            "fetch_contacts": self._handle_fetch_contacts,
+            "personalize": self._handle_personalize,
+        }
+
+        scratchpad = await run_agent_loop(
+            orchestrator_prompt_template=OUTREACH_ORCHESTRATOR_PROMPT,
+            prompt_vars={
+                "nct_id": inputs.trial_nct_id,
+                "brief_title": inputs.outreach_draft.get("brief_title", ""),
+                "outreach_draft": json.dumps(inputs.outreach_draft, indent=2),
+            },
+            action_handlers=handlers,
+            scratchpad=scratchpad,
+            emit=ctx.emit,
+        )
+
+        state = scratchpad.state
+        output = {
+            "contacts": state["contacts"],
+            "final_message": state["final_message"],
+            "subject_line": state["subject_line"],
+            "outreach_status": "ready_for_review",
+        }
+
+        return AgentResult(
+            success=True,
+            output_data=output,
+            gate_request=GateRequest(gate_type="outreach_review", requested_data=output),
+        )
+
+    async def _handle_fetch_contacts(
+        self, decision: AgentDecision, scratchpad: Scratchpad, budget: AgentBudget
+    ) -> tuple[str, bool]:
+        nct_id = decision.params.get("nct_id", scratchpad.state["trial_nct_id"])
+        result = await fetch_trial_tool(nct_id=nct_id)
+        if not result.success:
+            return f"Could not fetch trial: {result.error}", False
+        contacts = extract_contacts(result.data)
+        scratchpad.state["contacts"] = contacts
+        named = sum(1 for c in contacts if c.get("name"))
+        return f"Found {len(contacts)} contacts ({named} with names)", True
+
+    async def _handle_personalize(
+        self, decision: AgentDecision, scratchpad: Scratchpad, budget: AgentBudget
+    ) -> tuple[str, bool]:
+        contact_name = decision.params.get("contact_name", "")
+        facility = decision.params.get("facility", "the trial site")
+        original = scratchpad.state["final_message"]
+
+        result = await claude_json_call(
+            f"Personalize this outreach message for {contact_name} at {facility}. "
+            f"Keep the message professional and under 4 paragraphs.\n\nOriginal message:\n{original}\n\n"
+            'Respond with ONLY a JSON object: {{"message_body": "<personalized message>"}}',
+            max_tokens=800,
+        )
+        if result.success:
+            scratchpad.state["final_message"] = result.data.get("message_body", original)
+            return f"Personalized message for {contact_name}", True
+        return "Personalization failed, keeping original", False
+
+
+# ---------------------------------------------------------------------------
+# MonitorAgent — adaptive trial status monitoring
+# ---------------------------------------------------------------------------
+
 
 @register_agent
 class MonitorAgent(BaseAgent):
-    """Workflow: workflows/monitor.md
+    """Adaptive agent: reasons about trial changes and their impact.
 
-    For each watched trial: fetch current data → compare status/sites → collect changes.
+    Workflow: workflows/monitor.md
     """
 
     agent_type: ClassVar[str] = "monitor"
@@ -557,104 +799,97 @@ class MonitorAgent(BaseAgent):
             return AgentResult(success=False, error=f"Invalid input: {e}")
 
         watches = inputs.watches
-        await ctx.emit("progress", {"step": "checking_trials", "count": len(watches)})
+        watches_summary = "\n".join(
+            f"- {w['nct_id']}: last_status={w.get('last_status', '?')}, sites={w.get('last_site_count', '?')}"
+            for w in watches
+        )
 
-        changes: list[dict] = []
-        for watch in watches:
-            nct_id = watch["nct_id"]
+        scratchpad = Scratchpad(
+            state={
+                "watches": {w["nct_id"]: w for w in watches},
+                "changes": [],
+                "checked": set(),
+            }
+        )
 
-            # Tool: fetch_trial
-            trial_result = await fetch_trial_tool(nct_id=nct_id)
-            if not trial_result.success:
-                changes.append({"nct_id": nct_id, "change_type": "not_found", "detail": "Trial no longer available"})
-                continue
+        handlers = {
+            "check_trial": self._handle_check_trial,
+            "assess_impact": self._handle_assess_impact,
+        }
 
-            trial = trial_result.data
-
-            current_status = trial.get("overall_status", "")
-            last_status = watch.get("last_status", "")
-            if current_status and current_status != last_status:
-                changes.append(
-                    {
-                        "nct_id": nct_id,
-                        "change_type": "status_changed",
-                        "old_status": last_status,
-                        "new_status": current_status,
-                    }
-                )
-
-            current_sites = len(trial.get("locations", []))
-            last_sites = watch.get("last_site_count", 0)
-            if current_sites > last_sites:
-                changes.append(
-                    {
-                        "nct_id": nct_id,
-                        "change_type": "sites_added",
-                        "old_count": last_sites,
-                        "new_count": current_sites,
-                    }
-                )
-
-            await ctx.emit("progress", {"step": "checked_trial", "nct_id": nct_id})
+        scratchpad = await run_agent_loop(
+            orchestrator_prompt_template=MONITOR_ORCHESTRATOR_PROMPT,
+            prompt_vars={"watches_summary": watches_summary},
+            action_handlers=handlers,
+            scratchpad=scratchpad,
+            emit=ctx.emit,
+        )
 
         return AgentResult(
             success=True,
             output_data={
-                "changes": changes,
-                "trials_checked": len(watches),
+                "changes": scratchpad.state["changes"],
+                "trials_checked": len(scratchpad.state["checked"]),
                 "checked_at": datetime.now(timezone.utc).isoformat(),
             },
         )
 
+    async def _handle_check_trial(
+        self, decision: AgentDecision, scratchpad: Scratchpad, budget: AgentBudget
+    ) -> tuple[str, bool]:
+        nct_id = decision.params.get("nct_id", "")
+        last_status = decision.params.get("last_status", "")
+        last_site_count = decision.params.get("last_site_count", 0)
 
-@register_agent
-class OutreachAgent(BaseAgent):
-    """Workflow: workflows/outreach.md
+        result = await fetch_trial_tool(nct_id=nct_id)
+        scratchpad.state["checked"].add(nct_id)
 
-    Extract contacts → Personalize message → Human gate.
-    """
-
-    agent_type: ClassVar[str] = "outreach"
-
-    async def execute(self, ctx: AgentContext) -> AgentResult:
-        try:
-            inputs = OutreachInput(**ctx.input_data)
-        except Exception as e:
-            return AgentResult(success=False, error=f"Invalid input: {e}")
-
-        outreach_draft = inputs.outreach_draft
-        trial_nct_id = inputs.trial_nct_id
-
-        # Step 1: Extract contacts
-        await ctx.emit("progress", {"step": "extracting_contacts"})
-        trial_result = await fetch_trial_tool(nct_id=trial_nct_id)
-        contacts = []
-        if trial_result.success:
-            contacts = extract_contacts(trial_result.data)
-
-        # Step 2: Personalize message
-        await ctx.emit("progress", {"step": "finalizing_message"})
-        final_message = outreach_draft.get("message_body", "")
-        if contacts and contacts[0].get("name"):
-            personalized = await claude_json_call(
-                f"Personalize this outreach message for {contacts[0]['name']} at {contacts[0].get('facility', 'the trial site')}. "
-                f"Keep the message professional and under 4 paragraphs.\n\nOriginal message:\n{final_message}\n\n"
-                'Respond with ONLY a JSON object: {{"message_body": "<personalized message>"}}',
-                max_tokens=800,
+        if not result.success:
+            scratchpad.state["changes"].append(
+                {"nct_id": nct_id, "change_type": "not_found", "detail": "Trial no longer available"}
             )
-            if personalized.success:
-                final_message = personalized.data.get("message_body", final_message)
+            return f"{nct_id}: not found", True
 
-        # Step 3: Request human gate
-        output = {
-            "contacts": contacts,
-            "final_message": final_message,
-            "subject_line": outreach_draft.get("subject_line", f"Pre-screened patient candidate for {trial_nct_id}"),
-            "outreach_status": "ready_for_review",
-        }
+        trial = result.data
+        changes_found = []
 
-        return AgentResult(
-            success=True,
-            output_data=output,
-            gate_request=GateRequest(gate_type="outreach_review", requested_data=output),
-        )
+        current_status = trial.get("overall_status", "")
+        if current_status and current_status != last_status:
+            change = {
+                "nct_id": nct_id,
+                "change_type": "status_changed",
+                "old_status": last_status,
+                "new_status": current_status,
+            }
+            scratchpad.state["changes"].append(change)
+            changes_found.append(f"status: {last_status} → {current_status}")
+
+        current_sites = len(trial.get("locations", []))
+        if current_sites > last_site_count:
+            change = {
+                "nct_id": nct_id,
+                "change_type": "sites_added",
+                "old_count": last_site_count,
+                "new_count": current_sites,
+            }
+            scratchpad.state["changes"].append(change)
+            changes_found.append(f"sites: {last_site_count} → {current_sites}")
+
+        if changes_found:
+            return f"{nct_id}: {', '.join(changes_found)}", True
+        return f"{nct_id}: no changes", True
+
+    async def _handle_assess_impact(
+        self, decision: AgentDecision, scratchpad: Scratchpad, budget: AgentBudget
+    ) -> tuple[str, bool]:
+        nct_id = decision.params.get("nct_id", "")
+        change_type = decision.params.get("change_type", "")
+        detail = decision.params.get("detail", "")
+
+        # For now, record the assessment as a note on the change
+        for change in scratchpad.state["changes"]:
+            if change["nct_id"] == nct_id and change["change_type"] == change_type:
+                change["impact_assessment"] = detail
+                return f"Assessed impact of {change_type} on {nct_id}", True
+
+        return f"No matching change found for {nct_id}/{change_type}", False
