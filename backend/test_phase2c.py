@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import json
 import os
 import uuid
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -192,7 +191,9 @@ class TestMonitorAgent:
         agent = MonitorAgent()
         ctx, _ = _make_ctx({"watches": [{"nct_id": "NCT999", "last_status": "RECRUITING", "last_site_count": 0}]})
 
-        with patch("agents.fetch_trial_tool", new_callable=AsyncMock, return_value=ToolResult(success=False, error="Not found")):
+        with patch(
+            "agents.fetch_trial_tool", new_callable=AsyncMock, return_value=ToolResult(success=False, error="Not found")
+        ):
             result = await agent.execute(ctx)
 
         assert result.success is True
@@ -224,7 +225,9 @@ class TestOutreachAgent:
                         "facility": "UCLA",
                         "city": "LA",
                         "state": "CA",
-                        "contacts": [{"name": "Dr. Smith", "role": "CRC", "email": "smith@ucla.edu", "phone": "555-1234"}],
+                        "contacts": [
+                            {"name": "Dr. Smith", "role": "CRC", "email": "smith@ucla.edu", "phone": "555-1234"}
+                        ],
                     }
                 ]
             },

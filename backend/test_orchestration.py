@@ -11,7 +11,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from agents import AgentContext, AgentResult, BaseAgent, DossierAgent, MatchingAgent
-from tools import ToolResult
 from db_models import AgentEventDB, GateStatus, HumanGateDB, TaskStatus
 from dispatcher import _background_tasks, _registry, dispatch, dispatch_background, register_agent
 from models import (
@@ -23,6 +22,7 @@ from models import (
     TaskDetailResponse,
     TaskResponse,
 )
+from tools import ToolResult
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -167,27 +167,36 @@ class TestDispatcher:
         session = FakeSession()
         patient_id = uuid.uuid4()
 
-        mock_match = MagicMock()
-        mock_match.model_dump.return_value = {"nct_id": "NCT123", "match_score": 80}
-
-        mock_result = {
-            "patient_summary": "Summary",
-            "matches": [mock_match],
-            "total_trials_screened": 5,
-        }
-
-        mock_search = AsyncMock(return_value=ToolResult(success=True, data=[
-            {"nct_id": "NCT123", "brief_title": "Test", "phase": "Phase 2",
-             "overall_status": "RECRUITING", "conditions": ["NSCLC"],
-             "brief_summary": "A test trial", "eligibility_criteria": "Age 18+",
-             "locations": [], "interventions": []}
-        ]))
+        mock_search = AsyncMock(
+            return_value=ToolResult(
+                success=True,
+                data=[
+                    {
+                        "nct_id": "NCT123",
+                        "brief_title": "Test",
+                        "phase": "Phase 2",
+                        "overall_status": "RECRUITING",
+                        "conditions": ["NSCLC"],
+                        "brief_summary": "A test trial",
+                        "eligibility_criteria": "Age 18+",
+                        "locations": [],
+                        "interventions": [],
+                    }
+                ],
+            )
+        )
         mock_summary = AsyncMock(return_value=ToolResult(success=True, data="Summary"))
-        mock_analyze = AsyncMock(return_value=MagicMock(
-            content=[MagicMock(text='{"match_score": 80, "match_explanation": "Good match", '
-                               '"inclusion_evaluations": [], "exclusion_evaluations": [], '
-                               '"flags_for_oncologist": []}')]
-        ))
+        mock_analyze = AsyncMock(
+            return_value=MagicMock(
+                content=[
+                    MagicMock(
+                        text='{"match_score": 80, "match_explanation": "Good match", '
+                        '"inclusion_evaluations": [], "exclusion_evaluations": [], '
+                        '"flags_for_oncologist": []}'
+                    )
+                ]
+            )
+        )
 
         with (
             patch("agents.search_trials_tool", mock_search),
@@ -255,7 +264,11 @@ class TestDispatcher:
         ]
 
         with (
-            patch("agents.claude_json_call", new_callable=AsyncMock, return_value=ToolResult(success=True, data=json.loads(mock_response.content[0].text))),
+            patch(
+                "agents.claude_json_call",
+                new_callable=AsyncMock,
+                return_value=ToolResult(success=True, data=json.loads(mock_response.content[0].text)),
+            ),
         ):
             task = await dispatch(
                 session,
@@ -286,18 +299,36 @@ class TestDispatcher:
         patient_id = uuid.uuid4()
         parent_id = uuid.uuid4()
 
-        mock_search = AsyncMock(return_value=ToolResult(success=True, data=[
-            {"nct_id": "NCT123", "brief_title": "Test", "phase": "Phase 2",
-             "overall_status": "RECRUITING", "conditions": ["NSCLC"],
-             "brief_summary": "A test", "eligibility_criteria": "Age 18+",
-             "locations": [], "interventions": []}
-        ]))
+        mock_search = AsyncMock(
+            return_value=ToolResult(
+                success=True,
+                data=[
+                    {
+                        "nct_id": "NCT123",
+                        "brief_title": "Test",
+                        "phase": "Phase 2",
+                        "overall_status": "RECRUITING",
+                        "conditions": ["NSCLC"],
+                        "brief_summary": "A test",
+                        "eligibility_criteria": "Age 18+",
+                        "locations": [],
+                        "interventions": [],
+                    }
+                ],
+            )
+        )
         mock_summary = AsyncMock(return_value=ToolResult(success=True, data="S"))
-        mock_analyze = AsyncMock(return_value=MagicMock(
-            content=[MagicMock(text='{"match_score": 80, "match_explanation": "Good", '
-                               '"inclusion_evaluations": [], "exclusion_evaluations": [], '
-                               '"flags_for_oncologist": []}')]
-        ))
+        mock_analyze = AsyncMock(
+            return_value=MagicMock(
+                content=[
+                    MagicMock(
+                        text='{"match_score": 80, "match_explanation": "Good", '
+                        '"inclusion_evaluations": [], "exclusion_evaluations": [], '
+                        '"flags_for_oncologist": []}'
+                    )
+                ]
+            )
+        )
 
         with (
             patch("agents.search_trials_tool", mock_search),
@@ -338,23 +369,36 @@ class TestMatchingAgent:
             emit=mock_emit,
         )
 
-        mock_match = MagicMock()
-        mock_match.model_dump.return_value = {"nct_id": "NCT123", "match_score": 88}
-
-        mock_result = {"patient_summary": "Summary text", "matches": [mock_match], "total_trials_screened": 3}
-
-        mock_search = AsyncMock(return_value=ToolResult(success=True, data=[
-            {"nct_id": "NCT123", "brief_title": "Test", "phase": "Phase 2",
-             "overall_status": "RECRUITING", "conditions": ["NSCLC"],
-             "brief_summary": "A test trial", "eligibility_criteria": "Age 18+",
-             "locations": [], "interventions": []}
-        ]))
+        mock_search = AsyncMock(
+            return_value=ToolResult(
+                success=True,
+                data=[
+                    {
+                        "nct_id": "NCT123",
+                        "brief_title": "Test",
+                        "phase": "Phase 2",
+                        "overall_status": "RECRUITING",
+                        "conditions": ["NSCLC"],
+                        "brief_summary": "A test trial",
+                        "eligibility_criteria": "Age 18+",
+                        "locations": [],
+                        "interventions": [],
+                    }
+                ],
+            )
+        )
         mock_summary = AsyncMock(return_value=ToolResult(success=True, data="Summary text"))
-        mock_analyze = AsyncMock(return_value=MagicMock(
-            content=[MagicMock(text='{"match_score": 88, "match_explanation": "Good", '
-                               '"inclusion_evaluations": [], "exclusion_evaluations": [], '
-                               '"flags_for_oncologist": []}')]
-        ))
+        mock_analyze = AsyncMock(
+            return_value=MagicMock(
+                content=[
+                    MagicMock(
+                        text='{"match_score": 88, "match_explanation": "Good", '
+                        '"inclusion_evaluations": [], "exclusion_evaluations": [], '
+                        '"flags_for_oncologist": []}'
+                    )
+                ]
+            )
+        )
 
         with (
             patch("agents.search_trials_tool", mock_search),
@@ -445,7 +489,11 @@ class TestDossierAgent:
         ]
 
         with (
-            patch("agents.claude_json_call", new_callable=AsyncMock, return_value=ToolResult(success=True, data=json.loads(mock_response.content[0].text))),
+            patch(
+                "agents.claude_json_call",
+                new_callable=AsyncMock,
+                return_value=ToolResult(success=True, data=json.loads(mock_response.content[0].text)),
+            ),
         ):
             result = await agent.execute(ctx)
 
@@ -484,7 +532,11 @@ class TestDossierAgent:
         )
 
         with (
-            patch("agents.claude_json_call", new_callable=AsyncMock, return_value=ToolResult(success=False, error="Failed to parse JSON")),
+            patch(
+                "agents.claude_json_call",
+                new_callable=AsyncMock,
+                return_value=ToolResult(success=False, error="Failed to parse JSON"),
+            ),
         ):
             result = await agent.execute(ctx)
 

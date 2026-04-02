@@ -203,7 +203,9 @@ class MatchingAgent(BaseAgent):
 
         eligibility_text = trial["eligibility_criteria"]
         if len(eligibility_text) > 6000:
-            eligibility_text = eligibility_text[:6000] + "\n\n[Eligibility text truncated — focus on the criteria above]"
+            eligibility_text = (
+                eligibility_text[:6000] + "\n\n[Eligibility text truncated — focus on the criteria above]"
+            )
 
         patient_vars = format_patient_for_prompt(patient)
         prompt_result = render_prompt(

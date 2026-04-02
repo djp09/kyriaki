@@ -15,27 +15,24 @@ and will move into MatchingAgent in Phase 3.
 from __future__ import annotations
 
 import asyncio
-import json
 
 from config import get_settings
 from logging_config import get_logger
 from models import PatientProfile, TrialMatch
-from tools.claude_api import (
-    call_claude_with_retry as _call_claude_with_retry,
-    extract_minimal_result as _extract_minimal_result,
-    get_claude_client as _get_client,
-    paced_claude_call as _paced_claude_call,
-    parse_json_response as _parse_json_response,
-    repair_truncated_json as _repair_truncated_json,
-)
+from tools.claude_api import extract_minimal_result as _extract_minimal_result
+from tools.claude_api import get_claude_client as _get_client
+from tools.claude_api import paced_claude_call as _paced_claude_call
+from tools.claude_api import parse_json_response as _parse_json_response
+from tools.claude_api import repair_truncated_json as _repair_truncated_json  # noqa: F401
 from tools.data_formatter import (
     build_scored_match,
-    build_unscored_match as _build_unscored_match,
     format_patient_for_prompt,
 )
+from tools.data_formatter import (
+    build_unscored_match as _build_unscored_match,
+)
 from tools.prompt_renderer import render_prompt
-from tools.trial_search import search_trials_tool
-from trials_client import find_nearest_site, search_trials
+from trials_client import search_trials
 
 logger = get_logger("kyriaki.matching")
 
@@ -129,9 +126,7 @@ def _fallback_summary(patient: PatientProfile) -> str:
 
     summary = f"You are a {patient.age}-year-old navigating {patient.cancer_stage} {patient.cancer_type}."
     if treatments_str:
-        summary += (
-            f" You have been through {patient.lines_of_therapy} line(s) of treatment including {treatments_str}."
-        )
+        summary += f" You have been through {patient.lines_of_therapy} line(s) of treatment including {treatments_str}."
     if biomarkers_str:
         summary += f" Your biomarker profile includes {biomarkers_str}."
     summary += " We are searching for clinical trials that may be a good fit for your specific situation."

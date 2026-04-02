@@ -11,15 +11,13 @@ from typing import Any
 
 from logging_config import get_logger
 from models import CriterionEvaluation, PatientProfile, TrialMatch
-from tools import ToolResult, register_tool
+from tools import register_tool
 from trials_client import find_nearest_site
 
 logger = get_logger("kyriaki.tools.data_formatter")
 
 
-def build_scored_match(
-    trial: dict, analysis: dict, patient: PatientProfile
-) -> TrialMatch | None:
+def build_scored_match(trial: dict, analysis: dict, patient: PatientProfile) -> TrialMatch | None:
     """Build a TrialMatch from trial data + Claude analysis, with distance filtering."""
     nearest_site, distance = find_nearest_site(trial.get("locations", []), patient.location_zip)
 
