@@ -171,3 +171,36 @@ class ActivityItem(BaseModel):
     type: str  # "task", "event", "gate"
     timestamp: str
     data: dict
+
+
+# --- Ground truth feedback models ---
+
+
+class OutcomeUpdate(BaseModel):
+    """Manual outcome recording by a navigator."""
+
+    site_response: str | None = Field(default=None, pattern="^(accepted|declined|no_response)$")
+    screening_result: str | None = Field(default=None, pattern="^(eligible|ineligible|withdrawn)$")
+    notes: str | None = None
+
+
+class OutcomeResponse(BaseModel):
+    patient_id: str
+    nct_id: str
+    match_score: int | None = None
+    revised_score: int | None = None
+    navigator_decision: str | None = None
+    site_response: str | None = None
+    screening_result: str | None = None
+    outcome_notes: str | None = None
+    created_at: str
+    updated_at: str
+
+
+class OutcomeStats(BaseModel):
+    total_outcomes: int
+    by_navigator_decision: dict  # {"approved": 5, "rejected": 2}
+    by_screening_result: dict  # {"eligible": 3, "ineligible": 1, ...}
+    avg_score_by_decision: dict  # {"approved": 72.5, "rejected": 35.0}
+    avg_score_by_screening: dict  # {"eligible": 80.0, "ineligible": 40.0}
+    score_accuracy: dict  # {"high_score_eligible_pct": 0.85, ...}

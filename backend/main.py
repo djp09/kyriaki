@@ -44,11 +44,15 @@ from models import (
     MatchRequest,
     MatchResponse,
     MonitorRequest,
+    OutcomeResponse,
+    OutcomeStats,
+    OutcomeUpdate,
     OutreachRequest,
     PatientProfile,
     TaskDetailResponse,
     TaskResponse,
 )
+from tools.ground_truth import compute_outcome_stats, get_outcomes_for_patient, upsert_outcome
 from trials_client import get_trial
 
 settings = get_settings()
@@ -488,6 +492,21 @@ async def resolve_gate(gate_id: str, resolution: GateResolution, db: AsyncSessio
 
         # Auto-chain: dossier approved → enrollment
         if gate.gate_type == "dossier_review" and resolution.chain_to_trial:
+            # Ground truth: record navigator approved this trial
+            dossier = task.output_data.get("dossier", {})
+            section = next(
+                (s for s in dossier.get("sections", []) if s.get("nct_id") == resolution.chain_to_trial),
+                {},
+            )
+            await upsert_outcome(
+                db,
+                patient_id=task.patient_id,
+                nct_id=resolution.chain_to_trial,
+                match_score=section.get("match_score") or section.get("revised_score"),
+                revised_score=section.get("revised_score"),
+                navigator_decision="approved",
+            )
+
             await dispatch_background(
                 db,
                 "enrollment",
@@ -509,10 +528,33 @@ async def resolve_gate(gate_id: str, resolution: GateResolution, db: AsyncSessio
                 input_data={**task.output_data, "patient": task.input_data.get("patient", {})},
                 parent_task_id=task.id,
             )
+
+        # Ground truth: outreach approved → record site response
+        elif gate.gate_type == "outreach_review":
+            trial_nct_id = task.output_data.get("trial_nct_id") or task.input_data.get("trial_nct_id", "")
+            if trial_nct_id:
+                await upsert_outcome(
+                    db,
+                    patient_id=task.patient_id,
+                    nct_id=trial_nct_id,
+                    site_response="accepted",
+                    outcome_notes=resolution.notes,
+                )
+
     else:
         task.status = "failed"
         task.error = f"Gate rejected by {resolution.resolved_by}"
         task.completed_at = datetime.now(timezone.utc)
+
+        # Ground truth: record rejection
+        if gate.gate_type == "dossier_review" and resolution.chain_to_trial:
+            await upsert_outcome(
+                db,
+                patient_id=task.patient_id,
+                nct_id=resolution.chain_to_trial,
+                navigator_decision="rejected",
+                outcome_notes=resolution.notes,
+            )
 
     return {"status": "resolved", "gate_status": resolution.status}
 
@@ -522,3 +564,46 @@ async def patient_activity(patient_id: str, db: AsyncSession = Depends(get_db)):
     pid = _parse_uuid(patient_id)
     items = await get_patient_activity(db, pid)
     return {"patient_id": patient_id, "items": [ActivityItem(**i) for i in items]}
+
+
+# --- Ground truth feedback endpoints ---
+# NOTE: /stats must be registered before /{patient_id} to avoid route collision.
+
+
+@app.get("/api/outcomes/stats", response_model=OutcomeStats)
+async def outcome_stats(db: AsyncSession = Depends(get_db)):
+    """Aggregated accuracy statistics across all outcomes."""
+    result = await compute_outcome_stats(db)
+    return OutcomeStats(**result.data)
+
+
+@app.get("/api/outcomes/{patient_id}", response_model=list[OutcomeResponse])
+async def list_outcomes(patient_id: str, db: AsyncSession = Depends(get_db)):
+    """Get all outcomes for a patient."""
+    pid = _parse_uuid(patient_id)
+    result = await get_outcomes_for_patient(db, pid)
+    return [OutcomeResponse(**o) for o in result.data]
+
+
+@app.post("/api/outcomes/{patient_id}/{nct_id}", response_model=OutcomeResponse)
+async def record_outcome(patient_id: str, nct_id: str, update: OutcomeUpdate, db: AsyncSession = Depends(get_db)):
+    """Manually record or update a screening outcome for a patient-trial pairing."""
+    pid = _parse_uuid(patient_id)
+    if not _NCT_RE.match(nct_id):
+        raise HTTPException(400, "Invalid trial ID format")
+
+    await upsert_outcome(
+        db,
+        patient_id=pid,
+        nct_id=nct_id,
+        site_response=update.site_response,
+        screening_result=update.screening_result,
+        outcome_notes=update.notes,
+    )
+
+    # Fetch and return the updated outcome
+    result = await get_outcomes_for_patient(db, pid)
+    outcome = next((o for o in result.data if o["nct_id"] == nct_id), None)
+    if not outcome:
+        raise HTTPException(500, "Failed to retrieve recorded outcome")
+    return OutcomeResponse(**outcome)

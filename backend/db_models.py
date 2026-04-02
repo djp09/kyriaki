@@ -190,3 +190,36 @@ class TrialWatchDB(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
     __table_args__ = (Index("ix_watch_patient_id", "patient_id"),)
+
+
+# --- Ground truth feedback ---
+
+
+class TrialOutcomeDB(Base):
+    """Tracks real-world outcomes for patient-trial pairings.
+
+    Updated progressively as the pipeline advances:
+    1. Dossier gate resolved → navigator_decision set
+    2. Outreach gate resolved → site_response set
+    3. Manual input → screening_result set
+    """
+
+    __tablename__ = "trial_outcomes"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    patient_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("patient_profiles.id"), nullable=False)
+    nct_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    match_score: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    revised_score: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    navigator_decision: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    site_response: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    screening_result: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    outcome_notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+
+    __table_args__ = (
+        Index("ix_outcome_patient_id", "patient_id"),
+        Index("ix_outcome_nct_id", "nct_id"),
+        Index("ix_outcome_patient_nct", "patient_id", "nct_id", unique=True),
+    )
