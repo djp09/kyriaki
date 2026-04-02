@@ -11,6 +11,7 @@ import pytest
 
 from agents import AgentContext, EnrollmentAgent, MonitorAgent, OutreachAgent
 from models import EnrollmentRequest, GateResolution, MonitorRequest, OutreachRequest
+from tools import ToolResult
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -66,12 +67,6 @@ def _make_ctx(input_data):
     return ctx, emitted
 
 
-def _mock_sonnet_response(data: dict) -> MagicMock:
-    resp = MagicMock()
-    resp.content = [MagicMock(text=json.dumps(data))]
-    return resp
-
-
 # ---------------------------------------------------------------------------
 # EnrollmentAgent tests
 # ---------------------------------------------------------------------------
@@ -89,17 +84,25 @@ class TestEnrollmentAgent:
             }
         )
 
-        mock_trial = {"locations": [{"facility": "UCLA", "city": "LA", "state": "CA", "contacts": []}]}
-        packet_resp = _mock_sonnet_response({"screening_checklist": [{"item": "CBC", "category": "labs"}]})
-        prep_resp = _mock_sonnet_response({"what_to_expect": "You will visit the site."})
-        outreach_resp = _mock_sonnet_response({"subject_line": "Patient candidate", "message_body": "Dear CRC..."})
+        mock_trial_result = ToolResult(
+            success=True,
+            data={"locations": [{"facility": "UCLA", "city": "LA", "state": "CA", "contacts": []}]},
+        )
+        packet_data = {"screening_checklist": [{"item": "CBC", "category": "labs"}]}
+        prep_data = {"what_to_expect": "You will visit the site."}
+        outreach_data = {"subject_line": "Patient candidate", "message_body": "Dear CRC..."}
+
+        mock_claude = AsyncMock(
+            side_effect=[
+                ToolResult(success=True, data=packet_data),
+                ToolResult(success=True, data=prep_data),
+                ToolResult(success=True, data=outreach_data),
+            ]
+        )
 
         with (
-            patch("agents.get_trial", new_callable=AsyncMock, return_value=mock_trial),
-            patch(
-                "agents._paced_claude_call", new_callable=AsyncMock, side_effect=[packet_resp, prep_resp, outreach_resp]
-            ),
-            patch("agents._get_client", return_value=MagicMock()),
+            patch("agents.fetch_trial_tool", new_callable=AsyncMock, return_value=mock_trial_result),
+            patch("agents.claude_json_call", mock_claude),
         ):
             result = await agent.execute(ctx)
 
@@ -143,9 +146,12 @@ class TestMonitorAgent:
         agent = MonitorAgent()
         ctx, emitted = _make_ctx({"watches": [{"nct_id": "NCT123", "last_status": "RECRUITING", "last_site_count": 5}]})
 
-        changed_trial = {"overall_status": "ACTIVE_NOT_RECRUITING", "locations": [1, 2, 3, 4, 5]}
+        changed_trial = ToolResult(
+            success=True,
+            data={"overall_status": "ACTIVE_NOT_RECRUITING", "locations": [1, 2, 3, 4, 5]},
+        )
 
-        with patch("agents.get_trial", new_callable=AsyncMock, return_value=changed_trial):
+        with patch("agents.fetch_trial_tool", new_callable=AsyncMock, return_value=changed_trial):
             result = await agent.execute(ctx)
 
         assert result.success is True
@@ -158,9 +164,9 @@ class TestMonitorAgent:
         agent = MonitorAgent()
         ctx, _ = _make_ctx({"watches": [{"nct_id": "NCT123", "last_status": "RECRUITING", "last_site_count": 3}]})
 
-        trial = {"overall_status": "RECRUITING", "locations": [1, 2, 3, 4, 5]}
+        trial = ToolResult(success=True, data={"overall_status": "RECRUITING", "locations": [1, 2, 3, 4, 5]})
 
-        with patch("agents.get_trial", new_callable=AsyncMock, return_value=trial):
+        with patch("agents.fetch_trial_tool", new_callable=AsyncMock, return_value=trial):
             result = await agent.execute(ctx)
 
         assert result.success is True
@@ -173,9 +179,9 @@ class TestMonitorAgent:
         agent = MonitorAgent()
         ctx, _ = _make_ctx({"watches": [{"nct_id": "NCT123", "last_status": "RECRUITING", "last_site_count": 3}]})
 
-        trial = {"overall_status": "RECRUITING", "locations": [1, 2, 3]}
+        trial = ToolResult(success=True, data={"overall_status": "RECRUITING", "locations": [1, 2, 3]})
 
-        with patch("agents.get_trial", new_callable=AsyncMock, return_value=trial):
+        with patch("agents.fetch_trial_tool", new_callable=AsyncMock, return_value=trial):
             result = await agent.execute(ctx)
 
         assert result.success is True
@@ -186,7 +192,7 @@ class TestMonitorAgent:
         agent = MonitorAgent()
         ctx, _ = _make_ctx({"watches": [{"nct_id": "NCT999", "last_status": "RECRUITING", "last_site_count": 0}]})
 
-        with patch("agents.get_trial", new_callable=AsyncMock, return_value=None):
+        with patch("agents.fetch_trial_tool", new_callable=AsyncMock, return_value=ToolResult(success=False, error="Not found")):
             result = await agent.execute(ctx)
 
         assert result.success is True
@@ -210,22 +216,24 @@ class TestOutreachAgent:
             }
         )
 
-        trial = {
-            "locations": [
-                {
-                    "facility": "UCLA",
-                    "city": "LA",
-                    "state": "CA",
-                    "contacts": [{"name": "Dr. Smith", "role": "CRC", "email": "smith@ucla.edu", "phone": "555-1234"}],
-                }
-            ]
-        }
-        personalized = _mock_sonnet_response({"message_body": "Dear Dr. Smith, ..."})
+        trial_result = ToolResult(
+            success=True,
+            data={
+                "locations": [
+                    {
+                        "facility": "UCLA",
+                        "city": "LA",
+                        "state": "CA",
+                        "contacts": [{"name": "Dr. Smith", "role": "CRC", "email": "smith@ucla.edu", "phone": "555-1234"}],
+                    }
+                ]
+            },
+        )
+        personalized = ToolResult(success=True, data={"message_body": "Dear Dr. Smith, ..."})
 
         with (
-            patch("agents.get_trial", new_callable=AsyncMock, return_value=trial),
-            patch("agents._paced_claude_call", new_callable=AsyncMock, return_value=personalized),
-            patch("agents._get_client", return_value=MagicMock()),
+            patch("agents.fetch_trial_tool", new_callable=AsyncMock, return_value=trial_result),
+            patch("agents.claude_json_call", new_callable=AsyncMock, return_value=personalized),
         ):
             result = await agent.execute(ctx)
 
@@ -247,9 +255,12 @@ class TestOutreachAgent:
             }
         )
 
-        trial = {"locations": [{"facility": "UCLA", "city": "LA", "state": "CA", "contacts": []}]}
+        trial_result = ToolResult(
+            success=True,
+            data={"locations": [{"facility": "UCLA", "city": "LA", "state": "CA", "contacts": []}]},
+        )
 
-        with patch("agents.get_trial", new_callable=AsyncMock, return_value=trial):
+        with patch("agents.fetch_trial_tool", new_callable=AsyncMock, return_value=trial_result):
             result = await agent.execute(ctx)
 
         assert result.success is True

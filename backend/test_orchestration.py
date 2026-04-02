@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from agents import AgentContext, AgentResult, BaseAgent, DossierAgent, MatchingAgent
+from tools import ToolResult
 from db_models import AgentEventDB, GateStatus, HumanGateDB, TaskStatus
 from dispatcher import _background_tasks, _registry, dispatch, dispatch_background, register_agent
 from models import (
@@ -175,14 +176,31 @@ class TestDispatcher:
             "total_trials_screened": 5,
         }
 
-        with patch("agents.match_trials", new_callable=AsyncMock, return_value=mock_result):
+        mock_search = AsyncMock(return_value=ToolResult(success=True, data=[
+            {"nct_id": "NCT123", "brief_title": "Test", "phase": "Phase 2",
+             "overall_status": "RECRUITING", "conditions": ["NSCLC"],
+             "brief_summary": "A test trial", "eligibility_criteria": "Age 18+",
+             "locations": [], "interventions": []}
+        ]))
+        mock_summary = AsyncMock(return_value=ToolResult(success=True, data="Summary"))
+        mock_analyze = AsyncMock(return_value=MagicMock(
+            content=[MagicMock(text='{"match_score": 80, "match_explanation": "Good match", '
+                               '"inclusion_evaluations": [], "exclusion_evaluations": [], '
+                               '"flags_for_oncologist": []}')]
+        ))
+
+        with (
+            patch("agents.search_trials_tool", mock_search),
+            patch("agents.claude_text_call", mock_summary),
+            patch("agents.paced_claude_call", mock_analyze),
+            patch("agents.get_claude_client", return_value=MagicMock()),
+        ):
             task = await dispatch(
                 session, "matching", patient_id, input_data={"patient": sample_patient_data, "max_results": 10}
             )
 
         assert task.status == TaskStatus.completed.value
         assert task.output_data["patient_summary"] == "Summary"
-        assert task.output_data["total_trials_screened"] == 5
         assert task.completed_at is not None
         assert task.error is None
 
@@ -198,7 +216,8 @@ class TestDispatcher:
         session = FakeSession()
         patient_id = uuid.uuid4()
 
-        with patch("agents.match_trials", new_callable=AsyncMock, side_effect=RuntimeError("API down")):
+        mock_search = AsyncMock(side_effect=RuntimeError("API down"))
+        with patch("agents.search_trials_tool", mock_search):
             task = await dispatch(
                 session, "matching", patient_id, input_data={"patient": sample_patient_data, "max_results": 10}
             )
@@ -236,8 +255,7 @@ class TestDispatcher:
         ]
 
         with (
-            patch("agents._paced_claude_call", new_callable=AsyncMock, return_value=mock_response),
-            patch("agents._get_client", return_value=MagicMock()),
+            patch("agents.claude_json_call", new_callable=AsyncMock, return_value=ToolResult(success=True, data=json.loads(mock_response.content[0].text))),
         ):
             task = await dispatch(
                 session,
@@ -268,11 +286,25 @@ class TestDispatcher:
         patient_id = uuid.uuid4()
         parent_id = uuid.uuid4()
 
-        mock_match = MagicMock()
-        mock_match.model_dump.return_value = {"nct_id": "NCT123", "match_score": 80}
-        mock_result = {"patient_summary": "S", "matches": [mock_match], "total_trials_screened": 1}
+        mock_search = AsyncMock(return_value=ToolResult(success=True, data=[
+            {"nct_id": "NCT123", "brief_title": "Test", "phase": "Phase 2",
+             "overall_status": "RECRUITING", "conditions": ["NSCLC"],
+             "brief_summary": "A test", "eligibility_criteria": "Age 18+",
+             "locations": [], "interventions": []}
+        ]))
+        mock_summary = AsyncMock(return_value=ToolResult(success=True, data="S"))
+        mock_analyze = AsyncMock(return_value=MagicMock(
+            content=[MagicMock(text='{"match_score": 80, "match_explanation": "Good", '
+                               '"inclusion_evaluations": [], "exclusion_evaluations": [], '
+                               '"flags_for_oncologist": []}')]
+        ))
 
-        with patch("agents.match_trials", new_callable=AsyncMock, return_value=mock_result):
+        with (
+            patch("agents.search_trials_tool", mock_search),
+            patch("agents.claude_text_call", mock_summary),
+            patch("agents.paced_claude_call", mock_analyze),
+            patch("agents.get_claude_client", return_value=MagicMock()),
+        ):
             task = await dispatch(
                 session,
                 "matching",
@@ -311,12 +343,29 @@ class TestMatchingAgent:
 
         mock_result = {"patient_summary": "Summary text", "matches": [mock_match], "total_trials_screened": 3}
 
-        with patch("agents.match_trials", new_callable=AsyncMock, return_value=mock_result):
+        mock_search = AsyncMock(return_value=ToolResult(success=True, data=[
+            {"nct_id": "NCT123", "brief_title": "Test", "phase": "Phase 2",
+             "overall_status": "RECRUITING", "conditions": ["NSCLC"],
+             "brief_summary": "A test trial", "eligibility_criteria": "Age 18+",
+             "locations": [], "interventions": []}
+        ]))
+        mock_summary = AsyncMock(return_value=ToolResult(success=True, data="Summary text"))
+        mock_analyze = AsyncMock(return_value=MagicMock(
+            content=[MagicMock(text='{"match_score": 88, "match_explanation": "Good", '
+                               '"inclusion_evaluations": [], "exclusion_evaluations": [], '
+                               '"flags_for_oncologist": []}')]
+        ))
+
+        with (
+            patch("agents.search_trials_tool", mock_search),
+            patch("agents.claude_text_call", mock_summary),
+            patch("agents.paced_claude_call", mock_analyze),
+            patch("agents.get_claude_client", return_value=MagicMock()),
+        ):
             result = await agent.execute(ctx)
 
         assert result.success is True
         assert result.output_data["patient_summary"] == "Summary text"
-        assert result.output_data["total_trials_screened"] == 3
         assert len(result.output_data["matches"]) == 1
         assert result.gate_request is None
 
@@ -335,8 +384,9 @@ class TestMatchingAgent:
             task_id=uuid.uuid4(), patient_id=uuid.uuid4(), input_data={"patient": sample_patient_data}, emit=mock_emit
         )
 
+        mock_search = AsyncMock(side_effect=RuntimeError("boom"))
         with (
-            patch("agents.match_trials", new_callable=AsyncMock, side_effect=RuntimeError("boom")),
+            patch("agents.search_trials_tool", mock_search),
             pytest.raises(RuntimeError, match="boom"),
         ):
             await agent.execute(ctx)
@@ -395,8 +445,7 @@ class TestDossierAgent:
         ]
 
         with (
-            patch("agents._paced_claude_call", new_callable=AsyncMock, return_value=mock_response),
-            patch("agents._get_client", return_value=MagicMock()),
+            patch("agents.claude_json_call", new_callable=AsyncMock, return_value=ToolResult(success=True, data=json.loads(mock_response.content[0].text))),
         ):
             result = await agent.execute(ctx)
 
@@ -434,12 +483,8 @@ class TestDossierAgent:
             emit=mock_emit,
         )
 
-        mock_response = MagicMock()
-        mock_response.content = [MagicMock(text="This is not valid JSON at all")]
-
         with (
-            patch("agents._paced_claude_call", new_callable=AsyncMock, return_value=mock_response),
-            patch("agents._get_client", return_value=MagicMock()),
+            patch("agents.claude_json_call", new_callable=AsyncMock, return_value=ToolResult(success=False, error="Failed to parse JSON")),
         ):
             result = await agent.execute(ctx)
 

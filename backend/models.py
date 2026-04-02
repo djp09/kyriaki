@@ -58,6 +58,49 @@ class MatchResponse(BaseModel):
     )
 
 
+# --- Inter-agent boundary schemas ---
+# These validate the shape of data passed between agents via input_data/output_data.
+# Catches mismatches early instead of KeyErrors deep in Claude calls.
+
+
+class MatchingInput(BaseModel):
+    """Input schema for MatchingAgent."""
+
+    patient: dict
+    max_results: int = Field(default=10, ge=1, le=50)
+
+
+class DossierInput(BaseModel):
+    """Input schema for DossierAgent."""
+
+    patient: dict
+    matches: list[dict]
+    patient_summary: str = ""
+    top_n: int = Field(default=3, ge=1, le=10)
+
+
+class EnrollmentInput(BaseModel):
+    """Input schema for EnrollmentAgent."""
+
+    patient: dict
+    dossier: dict
+    trial_nct_id: str
+
+
+class OutreachInput(BaseModel):
+    """Input schema for OutreachAgent."""
+
+    outreach_draft: dict = Field(default_factory=dict)
+    trial_nct_id: str = ""
+    patient: dict = Field(default_factory=dict)
+
+
+class MonitorInput(BaseModel):
+    """Input schema for MonitorAgent."""
+
+    watches: list[dict] = Field(default_factory=list)
+
+
 # --- Agent orchestration models ---
 
 

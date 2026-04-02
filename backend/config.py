@@ -32,6 +32,11 @@ class Settings(BaseSettings):
     dossier_top_n: int = 3
     dossier_max_concurrent: int = 3
 
+    # Evaluator-optimizer loop
+    evaluation_enabled: bool = True
+    evaluation_score_min: int = 30  # Lower bound: below this is clearly poor, skip evaluation
+    evaluation_score_max: int = 70  # Upper bound: above this is clearly strong, skip evaluation
+
     # Matching engine
     match_timeout: int = 180
     max_concurrent_analyses: int = 10

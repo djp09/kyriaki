@@ -1,0 +1,297 @@
+"""Tool: Claude API interaction.
+
+Handles all Claude API calls with retry logic, rate-limit pacing,
+JSON response parsing, and truncated-JSON repair.
+
+This is the single place where Claude SDK calls happen.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import re
+import time
+
+import anthropic
+
+from config import get_settings
+from logging_config import get_logger
+from tools import ToolResult, register_tool
+
+logger = get_logger("kyriaki.tools.claude_api")
+
+
+# --- Client ---
+
+
+def get_claude_client() -> anthropic.AsyncAnthropic:
+    """Create an async Anthropic client using configured API key."""
+    settings = get_settings()
+    return anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+
+
+# --- Retry + pacing ---
+
+
+async def call_claude_with_retry(
+    client: anthropic.AsyncAnthropic,
+    *,
+    model: str,
+    max_tokens: int,
+    messages: list,
+    max_retries: int = 3,
+) -> anthropic.types.Message:
+    """Call Claude with exponential backoff on rate limits."""
+    for attempt in range(max_retries):
+        try:
+            return await client.messages.create(
+                model=model,
+                max_tokens=max_tokens,
+                messages=messages,
+            )
+        except anthropic.RateLimitError:
+            if attempt == max_retries - 1:
+                raise
+            wait_time = 2**attempt * 2
+            logger.warning("claude.rate_limited", attempt=attempt + 1, max_retries=max_retries, wait_s=wait_time)
+            await asyncio.sleep(wait_time)
+        except anthropic.APIStatusError as e:
+            if e.status_code == 429:
+                if attempt == max_retries - 1:
+                    raise
+                wait_time = 2**attempt * 2
+                logger.warning("claude.rate_limited", attempt=attempt + 1, max_retries=max_retries, wait_s=wait_time)
+                await asyncio.sleep(wait_time)
+            else:
+                raise
+    raise RuntimeError("Exhausted retries without success or exception")
+
+
+_last_call_time: float = 0.0
+_call_lock: asyncio.Lock | None = None
+
+
+def _get_call_lock() -> asyncio.Lock:
+    """Lazily create the lock on the running event loop (Python 3.9 compat)."""
+    global _call_lock
+    if _call_lock is None:
+        _call_lock = asyncio.Lock()
+    return _call_lock
+
+
+async def paced_claude_call(
+    client: anthropic.AsyncAnthropic,
+    *,
+    model: str,
+    max_tokens: int,
+    messages: list,
+) -> anthropic.types.Message:
+    """Call Claude with optional inter-call delay for rate-limit pacing."""
+    global _last_call_time
+    settings = get_settings()
+    if settings.inter_call_delay > 0:
+        async with _get_call_lock():
+            now = time.monotonic()
+            elapsed = now - _last_call_time
+            if elapsed < settings.inter_call_delay:
+                await asyncio.sleep(settings.inter_call_delay - elapsed)
+            result = await call_claude_with_retry(client, model=model, max_tokens=max_tokens, messages=messages)
+            _last_call_time = time.monotonic()
+            return result
+    return await call_claude_with_retry(client, model=model, max_tokens=max_tokens, messages=messages)
+
+
+# --- JSON parsing ---
+
+
+def repair_truncated_json(text: str) -> str | None:
+    """Attempt to close unclosed braces/brackets in truncated JSON."""
+    stack = []
+    in_string = False
+    escape_next = False
+
+    for ch in text:
+        if escape_next:
+            escape_next = False
+            continue
+        if ch == "\\":
+            if in_string:
+                escape_next = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+
+        if ch in "{[":
+            stack.append("}" if ch == "{" else "]")
+        elif ch in "}]" and stack and stack[-1] == ch:
+            stack.pop()
+
+    if not stack:
+        return text
+
+    truncated = text
+
+    if in_string:
+        truncated += '"'
+
+    truncated = re.sub(r',\s*"[^"]*$', "", truncated)
+    truncated = re.sub(r",\s*$", "", truncated)
+    truncated = re.sub(r':\s*"[^"]*$', ': ""', truncated)
+    truncated = re.sub(r":\s*$", ": null", truncated)
+
+    for closer in reversed(stack):
+        truncated += closer
+
+    return truncated
+
+
+def parse_json_response(text: str) -> dict | None:
+    """Parse JSON from Claude's response text, handling markdown fences and truncation."""
+    if not text:
+        return None
+
+    text = text.strip()
+
+    if text.startswith("```"):
+        text = re.sub(r"^```\w*\n?", "", text)
+        text = re.sub(r"\n?```\s*$", "", text)
+        text = text.strip()
+
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    first_brace = text.find("{")
+    last_brace = text.rfind("}")
+    if first_brace != -1 and last_brace > first_brace:
+        try:
+            return json.loads(text[first_brace : last_brace + 1])
+        except json.JSONDecodeError:
+            pass
+
+    if first_brace != -1:
+        partial = text[first_brace:]
+        repaired = repair_truncated_json(partial)
+        if repaired is not None:
+            try:
+                return json.loads(repaired)
+            except json.JSONDecodeError:
+                pass
+
+    return None
+
+
+def extract_minimal_result(text: str, nct_id: str) -> dict | None:
+    """Extract match_score and explanation via regex when full JSON parse fails."""
+    score_match = re.search(r'"match_score"\s*:\s*(\d+)', text)
+    explanation_match = re.search(r'"match_explanation"\s*:\s*"([^"]*)"', text)
+
+    if score_match:
+        return {
+            "match_score": int(score_match.group(1)),
+            "match_explanation": explanation_match.group(1)
+            if explanation_match
+            else "Analysis could not be fully parsed. Please review the trial details with your oncologist.",
+            "inclusion_evaluations": [],
+            "exclusion_evaluations": [],
+            "flags_for_oncologist": [
+                "Full eligibility analysis was incomplete — discuss all criteria with your oncologist"
+            ],
+        }
+    return None
+
+
+# --- High-level tool functions ---
+
+
+async def claude_json_call(prompt: str, *, model: str | None = None, max_tokens: int = 1500) -> ToolResult:
+    """Call Claude and parse the response as JSON. Returns ToolResult."""
+    settings = get_settings()
+    model = model or settings.claude_model
+    try:
+        response = await paced_claude_call(
+            get_claude_client(),
+            model=model,
+            max_tokens=max_tokens,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        result = parse_json_response(response.content[0].text)
+        if result is None:
+            return ToolResult(success=False, error="Failed to parse JSON from Claude response")
+        return ToolResult(success=True, data=result)
+    except Exception as e:
+        return ToolResult(success=False, error=f"{type(e).__name__}: {e}")
+
+
+async def claude_text_call(prompt: str, *, model: str | None = None, max_tokens: int = 300) -> ToolResult:
+    """Call Claude and return plain text response. Returns ToolResult."""
+    settings = get_settings()
+    model = model or settings.claude_model
+    try:
+        response = await paced_claude_call(
+            get_claude_client(),
+            model=model,
+            max_tokens=max_tokens,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return ToolResult(success=True, data=response.content[0].text.strip())
+    except Exception as e:
+        return ToolResult(success=False, error=f"{type(e).__name__}: {e}")
+
+
+async def evaluate_score(
+    *,
+    patient_vars: dict,
+    nct_id: str,
+    brief_title: str,
+    eligibility_criteria: str,
+    initial_score: int,
+    initial_explanation: str,
+    criteria_json: str,
+) -> ToolResult:
+    """Evaluator-optimizer: review an initial match score for errors.
+
+    Returns ToolResult with data: {confirmed, adjusted_score, adjustment_reason, errors_found}
+    """
+    from tools.prompt_renderer import render_prompt
+
+    prompt_result = render_prompt(
+        prompt_name="score_evaluation",
+        **patient_vars,
+        nct_id=nct_id,
+        brief_title=brief_title,
+        eligibility_criteria=eligibility_criteria,
+        initial_score=initial_score,
+        initial_explanation=initial_explanation,
+        criteria_json=criteria_json,
+    )
+    if not prompt_result.success:
+        return ToolResult(success=False, error=f"Prompt render failed: {prompt_result.error}")
+
+    result = await claude_json_call(prompt_result.data, max_tokens=500)
+    if not result.success:
+        return ToolResult(success=False, error=result.error)
+
+    data = result.data
+    # Ensure expected shape
+    return ToolResult(
+        success=True,
+        data={
+            "confirmed": data.get("confirmed", True),
+            "adjusted_score": data.get("adjusted_score"),
+            "adjustment_reason": data.get("adjustment_reason", ""),
+            "errors_found": data.get("errors_found", []),
+        },
+    )
+
+
+# --- Register tools ---
+
+register_tool("claude_json_call", claude_json_call)
+register_tool("claude_text_call", claude_text_call)
+register_tool("evaluate_score", evaluate_score)

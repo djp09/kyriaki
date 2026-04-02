@@ -97,6 +97,47 @@ Respond with ONLY a JSON object — no markdown fences, no commentary:
 {{"revised_score": <int 0-100>, "score_justification": "<detailed reasoning>", "criteria_analysis": [{{"criterion": "<exact text>", "type": "inclusion|exclusion", "status": "met|not_met|unknown|needs_verification", "evidence": "<patient data cited>", "notes": "<any caveats>"}}], "patient_summary": "<2-3 paragraphs, plain language>", "clinical_summary": "<structured for navigator/coordinator>", "next_steps": ["<action item>"], "flags": ["<items needing verification>"]}}
 """
 
+# --- Evaluator-optimizer: score evaluation ---
+
+SCORE_EVALUATION_PROMPT = """\
+You are a senior oncology clinical trial eligibility REVIEWER. Another analyst has scored a patient-trial match. Your job is to evaluate their work for errors.
+
+## Patient Profile
+- **Cancer Type:** {cancer_type}
+- **Stage:** {cancer_stage}
+- **Biomarkers:** {biomarkers}
+- **Prior Treatments:** {prior_treatments} ({lines_of_therapy} prior line(s) of therapy)
+- **Age:** {age}
+- **Sex:** {sex}
+- **ECOG Performance Status:** {ecog_score}
+
+## Clinical Trial: {nct_id} — {brief_title}
+
+### Eligibility Criteria
+{eligibility_criteria}
+
+## Initial Analysis (to review)
+Score: {initial_score}/100
+Explanation: {initial_explanation}
+
+### Criteria Evaluations
+{criteria_json}
+
+## Your Review Task
+
+Check the initial analysis for these specific errors:
+1. **Logical inconsistency:** Did the analyst mark a criterion "met" when the patient data says otherwise?
+2. **Missed hard disqualifiers:** Is there a required biomarker, cancer type, or stage the patient clearly lacks?
+3. **Score-rubric mismatch:** Does the score align with the rubric? (85-100 = all key criteria met, 0-19 = hard criterion failed, etc.)
+4. **Overlooked exclusion criteria:** Did the analyst miss an exclusion criterion the patient likely triggers?
+5. **Inflated unknowns:** Are criteria marked "unknown" when the patient data actually provides an answer?
+
+If the score is correct, confirm it. If not, provide an adjusted score with specific reasoning.
+
+Respond with ONLY a JSON object:
+{{"confirmed": <true if score is correct, false if adjusted>, "adjusted_score": <int 0-100 or null if confirmed>, "adjustment_reason": "<specific error found, or 'Score is consistent with analysis' if confirmed>", "errors_found": ["<specific error>"]}}
+"""
+
 # --- Phase 2C: Enrollment pipeline prompts ---
 
 ENROLLMENT_PACKET_PROMPT = """\
