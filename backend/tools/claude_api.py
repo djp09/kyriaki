@@ -17,7 +17,7 @@ import anthropic
 
 from config import get_settings
 from logging_config import get_logger
-from tools import ToolResult, register_tool
+from tools import ToolResult, ToolSpec, register_tool
 
 logger = get_logger("kyriaki.tools.claude_api")
 
@@ -290,8 +290,49 @@ async def evaluate_score(
     )
 
 
-# --- Register tools ---
+# --- Register tools with specs ---
 
-register_tool("claude_json_call", claude_json_call)
-register_tool("claude_text_call", claude_text_call)
-register_tool("evaluate_score", evaluate_score)
+register_tool(
+    "claude_json_call",
+    claude_json_call,
+    ToolSpec(
+        name="claude_json_call",
+        description="Call Claude and parse the response as JSON.",
+        parameters={
+            "prompt": "The full prompt text",
+            "model": "Model override (default: Sonnet)",
+            "max_tokens": "Max response tokens (default: 1500)",
+        },
+        returns="Parsed JSON dict from Claude's response",
+        edge_cases=["Returns success=False if JSON parsing fails", "Handles markdown fences and truncated JSON"],
+    ),
+)
+register_tool(
+    "claude_text_call",
+    claude_text_call,
+    ToolSpec(
+        name="claude_text_call",
+        description="Call Claude and return plain text response.",
+        parameters={
+            "prompt": "The full prompt text",
+            "model": "Model override",
+            "max_tokens": "Max tokens (default: 300)",
+        },
+        returns="Plain text string",
+    ),
+)
+register_tool(
+    "evaluate_score",
+    evaluate_score,
+    ToolSpec(
+        name="evaluate_score",
+        description="Re-evaluate a match score for logical errors, missed disqualifiers, and rubric mismatches.",
+        parameters={
+            "patient_vars": "Formatted patient profile dict",
+            "nct_id": "Trial ID",
+            "initial_score": "Score to review",
+        },
+        returns="Dict with confirmed (bool), adjusted_score, adjustment_reason, errors_found",
+        edge_cases=["Only useful for borderline scores (30-70)", "Returns confirmed=True if score is correct"],
+    ),
+)

@@ -11,7 +11,7 @@ from typing import Any
 
 from logging_config import get_logger
 from models import CriterionEvaluation, PatientProfile, TrialMatch
-from tools import register_tool
+from tools import ToolSpec, register_tool
 from trials_client import find_nearest_site
 
 logger = get_logger("kyriaki.tools.data_formatter")
@@ -115,10 +115,51 @@ def extract_contacts(trial: dict, max_sites: int = 5) -> list[dict]:
     return contacts
 
 
-# --- Register tools ---
+# --- Register tools with specs ---
 
-register_tool("build_scored_match", build_scored_match)
-register_tool("build_unscored_match", build_unscored_match)
-register_tool("build_dossier_section", build_dossier_section)
-register_tool("format_patient_for_prompt", format_patient_for_prompt)
-register_tool("extract_contacts", extract_contacts)
+register_tool(
+    "build_scored_match",
+    build_scored_match,
+    ToolSpec(
+        name="build_scored_match",
+        description="Build a TrialMatch from trial data + analysis, filtering by distance.",
+        returns="TrialMatch object, or None if distance exceeds patient's travel limit",
+    ),
+)
+register_tool(
+    "build_unscored_match",
+    build_unscored_match,
+    ToolSpec(
+        name="build_unscored_match",
+        description="Build a TrialMatch without analysis (fallback when analysis fails).",
+        returns="TrialMatch with score=0 and advisory flags",
+    ),
+)
+register_tool(
+    "build_dossier_section",
+    build_dossier_section,
+    ToolSpec(
+        name="build_dossier_section",
+        description="Build a dossier section from deep analysis, with error fallback.",
+        returns="Dict with nct_id, analysis results, or analysis_error if parse failed",
+    ),
+)
+register_tool(
+    "format_patient_for_prompt",
+    format_patient_for_prompt,
+    ToolSpec(
+        name="format_patient_for_prompt",
+        description="Format PatientProfile into dict for prompt template rendering.",
+        returns="Dict with string-formatted patient fields ready for .format()",
+    ),
+)
+register_tool(
+    "extract_contacts",
+    extract_contacts,
+    ToolSpec(
+        name="extract_contacts",
+        description="Extract contact information from trial location data (up to 5 sites).",
+        returns="List of contact dicts with name, role, phone, email, facility, city, state",
+        edge_cases=["Many trials have no named contacts — check len before personalizing"],
+    ),
+)

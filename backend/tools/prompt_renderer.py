@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import prompts
 from logging_config import get_logger
-from tools import ToolResult, register_tool
+from tools import ToolResult, ToolSpec, register_tool
 
 logger = get_logger("kyriaki.tools.prompt_renderer")
 
@@ -139,6 +139,16 @@ def render_prompt(*, prompt_name: str, **variables) -> ToolResult:
         return ToolResult(success=False, error=f"Template variable error: {e}")
 
 
-# --- Register tool ---
+# --- Register tool with spec ---
 
-register_tool("render_prompt", render_prompt)
+register_tool(
+    "render_prompt",
+    render_prompt,
+    ToolSpec(
+        name="render_prompt",
+        description="Validate required variables and render a prompt template.",
+        parameters={"prompt_name": "One of: " + ", ".join(PROMPT_SCHEMAS.keys()), "**variables": "Template variables"},
+        returns="Rendered prompt string ready for Claude",
+        edge_cases=["Returns error if required variables are missing — check before calling Claude"],
+    ),
+)

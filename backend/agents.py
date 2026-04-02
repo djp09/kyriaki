@@ -40,6 +40,7 @@ from prompts import (
     MONITOR_ORCHESTRATOR_PROMPT,
     OUTREACH_ORCHESTRATOR_PROMPT,
 )
+from routing import classify_patient
 from tools.claude_api import (
     claude_json_call,
     claude_text_call,
@@ -125,6 +126,10 @@ class MatchingAgent(BaseAgent):
         max_results = inputs.max_results
         settings = get_settings()
 
+        # Route: classify patient complexity → configure budget and strategy
+        route = classify_patient(patient)
+        budget = route.to_budget()
+
         # Patient summary runs concurrently with the agent loop
         summary_task = asyncio.create_task(self._generate_summary(patient))
 
@@ -134,6 +139,7 @@ class MatchingAgent(BaseAgent):
             **patient_vars,
             "location_zip": patient.location_zip,
             "willing_to_travel_miles": patient.willing_to_travel_miles,
+            "strategy_hint": route.strategy_hint,
         }
 
         # Agent-specific state stored in scratchpad
@@ -144,6 +150,7 @@ class MatchingAgent(BaseAgent):
                 "trials_pool": {},  # nct_id → trial dict (deduplicated)
                 "analyses": {},  # nct_id → analysis dict
                 "settings": settings,
+                "route": route,
             }
         )
 
@@ -154,12 +161,13 @@ class MatchingAgent(BaseAgent):
             "evaluate": self._handle_evaluate,
         }
 
-        # Run the adaptive loop
+        # Run the adaptive loop with routed budget
         scratchpad = await run_agent_loop(
             orchestrator_prompt_template=MATCHING_ORCHESTRATOR_PROMPT,
             prompt_vars=prompt_vars,
             action_handlers=handlers,
             scratchpad=scratchpad,
+            budget=budget,
             emit=ctx.emit,
         )
 

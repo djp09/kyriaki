@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from db_models import TrialOutcomeDB
 from logging_config import get_logger
-from tools import ToolResult, register_tool
+from tools import ToolResult, ToolSpec, register_tool
 
 logger = get_logger("kyriaki.tools.ground_truth")
 
@@ -182,8 +182,32 @@ async def compute_outcome_stats(session: AsyncSession) -> ToolResult:
     )
 
 
-# --- Register tools ---
+# --- Register tools with specs ---
 
-register_tool("upsert_outcome", upsert_outcome)
-register_tool("get_outcomes_for_patient", get_outcomes_for_patient)
-register_tool("compute_outcome_stats", compute_outcome_stats)
+register_tool(
+    "upsert_outcome",
+    upsert_outcome,
+    ToolSpec(
+        name="upsert_outcome",
+        description="Create or update an outcome record for a patient-trial pairing.",
+        returns="Dict with outcome_id",
+    ),
+)
+register_tool(
+    "get_outcomes_for_patient",
+    get_outcomes_for_patient,
+    ToolSpec(
+        name="get_outcomes_for_patient",
+        description="Get all outcomes for a patient, newest first.",
+        returns="List of outcome dicts",
+    ),
+)
+register_tool(
+    "compute_outcome_stats",
+    compute_outcome_stats,
+    ToolSpec(
+        name="compute_outcome_stats",
+        description="Compute accuracy statistics across all outcomes.",
+        returns="Dict with total_outcomes, score distributions by decision/screening result, accuracy metrics",
+    ),
+)

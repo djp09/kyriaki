@@ -7,7 +7,7 @@ The underlying trials_client handles caching, retries, and data extraction.
 from __future__ import annotations
 
 from logging_config import get_logger
-from tools import ToolResult, register_tool
+from tools import ToolResult, ToolSpec, register_tool
 from trials_client import find_nearest_site, get_trial, search_trials
 
 logger = get_logger("kyriaki.tools.trial_search")
@@ -49,8 +49,54 @@ def nearest_site_tool(*, locations: list[dict], patient_zip: str) -> ToolResult:
     return ToolResult(success=True, data={"site": site, "distance": distance})
 
 
-# --- Register tools ---
+# --- Register tools with specs ---
 
-register_tool("search_trials", search_trials_tool)
-register_tool("fetch_trial", fetch_trial_tool)
-register_tool("nearest_site", nearest_site_tool)
+register_tool(
+    "search_trials",
+    search_trials_tool,
+    ToolSpec(
+        name="search_trials",
+        description="Search ClinicalTrials.gov for recruiting trials matching criteria.",
+        parameters={
+            "cancer_type": "Condition to search (e.g., 'Non-Small Cell Lung Cancer')",
+            "age": "Patient age for filtering",
+            "sex": "Patient sex for filtering",
+            "page_size": "Max results (default 10, max 100)",
+            "query_intr": "Intervention search (e.g., 'osimertinib', 'pembrolizumab')",
+            "query_term": "General term search (e.g., 'immunotherapy EGFR')",
+        },
+        returns="List of trial dicts with nct_id, brief_title, eligibility_criteria, locations, etc.",
+        examples=[
+            "search(cancer_type='NSCLC') → broad condition search",
+            "search(cancer_type='NSCLC', query_intr='osimertinib') → targeted EGFR therapy search",
+            "search(cancer_type='breast cancer', query_term='HER2 positive') → biomarker-specific",
+        ],
+        edge_cases=[
+            "Returns empty list if no trials match — broaden search terms",
+            "Never search for just 'cancer' — always include specific type",
+            "Results are cached for 5 minutes — same query returns same results",
+            "page_size capped at 100 by ClinicalTrials.gov API",
+        ],
+    ),
+)
+register_tool(
+    "fetch_trial",
+    fetch_trial_tool,
+    ToolSpec(
+        name="fetch_trial",
+        description="Fetch a single trial by NCT ID for detailed data (sites, contacts, status).",
+        parameters={"nct_id": "Trial identifier (e.g., 'NCT04410796')"},
+        returns="Full trial dict with locations, contacts, eligibility criteria",
+        edge_cases=["Returns success=False if trial not found or API error"],
+    ),
+)
+register_tool(
+    "nearest_site",
+    nearest_site_tool,
+    ToolSpec(
+        name="nearest_site",
+        description="Find the nearest trial site to a patient's ZIP code.",
+        parameters={"locations": "List of trial location dicts", "patient_zip": "Patient ZIP code"},
+        returns="Dict with 'site' (nearest site info) and 'distance' (miles)",
+    ),
+)
