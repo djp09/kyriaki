@@ -257,9 +257,9 @@ class TestDispatcher:
                 patient_id,
                 input_data={
                     "patient": sample_patient_data,
-                    "matches": sample_match_output["matches"][:1],
+                    "match": sample_match_output["matches"][0],
+                    "nct_id": sample_match_output["matches"][0]["nct_id"],
                     "patient_summary": "Summary",
-                    "top_n": 1,
                 },
             )
 
@@ -375,9 +375,9 @@ class TestDossierAgent:
             patient_id=uuid.uuid4(),
             input_data={
                 "patient": sample_patient_data,
-                "matches": sample_match_output["matches"][:1],
+                "match": sample_match_output["matches"][0],
+                "nct_id": sample_match_output["matches"][0]["nct_id"],
                 "patient_summary": "Summary",
-                "top_n": 1,
             },
             emit=mock_emit,
         )
@@ -403,6 +403,7 @@ class TestDossierAgent:
         assert result.gate_request is not None
         assert result.gate_request.gate_type == "dossier_review"
         dossier = result.output_data["dossier"]
+        assert dossier["nct_id"] == sample_match_output["matches"][0]["nct_id"]
         assert len(dossier["sections"]) == 1
         assert dossier["sections"][0]["nct_id"] == "NCT12345678"
         assert dossier["sections"][0]["revised_score"] == 92
@@ -420,9 +421,9 @@ class TestDossierAgent:
             patient_id=uuid.uuid4(),
             input_data={
                 "patient": sample_patient_data,
-                "matches": sample_match_output["matches"][:1],
+                "match": sample_match_output["matches"][0],
+                "nct_id": sample_match_output["matches"][0]["nct_id"],
                 "patient_summary": "Summary",
-                "top_n": 1,
             },
             emit=mock_emit,
         )
@@ -455,12 +456,12 @@ class TestModels:
         assert resp.output_data == {"key": "value"}
 
     def test_dossier_request_validation(self):
-        req = DossierRequest(matching_task_id=str(uuid.uuid4()), top_n=5)
-        assert req.top_n == 5
+        req = DossierRequest(matching_task_id=str(uuid.uuid4()), nct_id="NCT12345678")
+        assert req.nct_id == "NCT12345678"
 
-    def test_dossier_request_default_top_n(self):
-        req = DossierRequest(matching_task_id=str(uuid.uuid4()))
-        assert req.top_n == 3
+    def test_dossier_request_requires_nct_id(self):
+        with pytest.raises(Exception):
+            DossierRequest(matching_task_id=str(uuid.uuid4()))
 
     def test_gate_resolution_approved(self):
         res = GateResolution(status="approved", resolved_by="dr.smith@hospital.org", notes="Looks good")

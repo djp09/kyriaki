@@ -326,11 +326,40 @@ async def agent_match(request: MatchRequest, db: AsyncSession = Depends(get_db))
     return _task_to_response(task)
 
 
+async def _find_dossier_task_for_trial(db: AsyncSession, patient_id: uuid.UUID, nct_id: str) -> AgentTaskDB | None:
+    """Find an existing active dossier task for a specific trial (dedup)."""
+    stmt = (
+        select(AgentTaskDB)
+        .where(
+            AgentTaskDB.patient_id == patient_id,
+            AgentTaskDB.agent_type == "dossier",
+            AgentTaskDB.status.in_(["pending", "running", "blocked"]),
+        )
+        .order_by(AgentTaskDB.created_at.desc())
+    )
+    result = await db.execute(stmt)
+    for task in result.scalars().all():
+        if task.input_data and task.input_data.get("nct_id") == nct_id:
+            return task
+    return None
+
+
 @app.post("/api/agents/dossier", response_model=TaskResponse)
 async def agent_dossier(request: DossierRequest, db: AsyncSession = Depends(get_db)):
     matching_task = await db.get(AgentTaskDB, _parse_uuid(request.matching_task_id))
     if not matching_task or matching_task.status != "completed":
         raise HTTPException(404, "Matching task not found or not completed")
+
+    # Find the specific match from matching results
+    matches = matching_task.output_data.get("matches", [])
+    match = next((m for m in matches if m.get("nct_id") == request.nct_id), None)
+    if not match:
+        raise HTTPException(404, f"Trial {request.nct_id} not found in matching results")
+
+    # Dedup: return existing task if this trial is already being analyzed
+    existing = await _find_dossier_task_for_trial(db, matching_task.patient_id, request.nct_id)
+    if existing:
+        return _task_to_response(existing)
 
     task = await dispatch_background(
         db,
@@ -338,11 +367,12 @@ async def agent_dossier(request: DossierRequest, db: AsyncSession = Depends(get_
         matching_task.patient_id,
         input_data={
             "patient": matching_task.input_data["patient"],
-            "matches": matching_task.output_data["matches"],
+            "match": match,
+            "nct_id": request.nct_id,
             "patient_summary": matching_task.output_data.get("patient_summary", ""),
-            "top_n": request.top_n,
         },
         parent_task_id=matching_task.id,
+        allow_duplicate=True,  # multiple dossier tasks for different trials
     )
     return _task_to_response(task)
 
@@ -566,33 +596,37 @@ async def resolve_gate(gate_id: str, resolution: GateResolution, db: AsyncSessio
         task.completed_at = datetime.now(timezone.utc)
 
         # Auto-chain: dossier approved → enrollment
-        if gate.gate_type == "dossier_review" and resolution.chain_to_trial:
-            # Ground truth: record navigator approved this trial
+        if gate.gate_type == "dossier_review":
             dossier = task.output_data.get("dossier", {})
-            section = next(
-                (s for s in dossier.get("sections", []) if s.get("nct_id") == resolution.chain_to_trial),
-                {},
-            )
-            await upsert_outcome(
-                db,
-                patient_id=task.patient_id,
-                nct_id=resolution.chain_to_trial,
-                match_score=section.get("match_score") or section.get("revised_score"),
-                revised_score=section.get("revised_score"),
-                navigator_decision="approved",
-            )
+            # Derive nct_id from dossier output (single-trial) or fallback to request
+            chain_trial = dossier.get("nct_id") or resolution.chain_to_trial
+            if chain_trial:
+                section = next(
+                    (s for s in dossier.get("sections", []) if s.get("nct_id") == chain_trial),
+                    {},
+                )
+                # Ground truth: record navigator approved this trial
+                await upsert_outcome(
+                    db,
+                    patient_id=task.patient_id,
+                    nct_id=chain_trial,
+                    match_score=section.get("match_score") or section.get("revised_score"),
+                    revised_score=section.get("revised_score"),
+                    navigator_decision="approved",
+                )
 
-            await dispatch_background(
-                db,
-                "enrollment",
-                task.patient_id,
-                input_data={
-                    "patient": task.input_data.get("patient", {}),
-                    "dossier": task.output_data.get("dossier", {}),
-                    "trial_nct_id": resolution.chain_to_trial,
-                },
-                parent_task_id=task.id,
-            )
+                await dispatch_background(
+                    db,
+                    "enrollment",
+                    task.patient_id,
+                    input_data={
+                        "patient": task.input_data.get("patient", {}),
+                        "dossier": dossier,
+                        "trial_nct_id": chain_trial,
+                    },
+                    parent_task_id=task.id,
+                    allow_duplicate=True,
+                )
 
         # Auto-chain: enrollment approved → outreach
         elif gate.gate_type == "enrollment_review":

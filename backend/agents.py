@@ -612,7 +612,10 @@ class MatchingAgent(BaseAgent):
 
 @register_agent
 class DossierAgent(BaseAgent):
-    """Adaptive agent: reasons about which trials need deeper investigation.
+    """Adaptive agent: deep eligibility analysis for a single trial.
+
+    Analyzes one specific trial's eligibility criteria against the patient profile.
+    Each trial gets its own dossier task and gate for independent review.
 
     Workflow: workflows/dossier.md
     """
@@ -626,18 +629,15 @@ class DossierAgent(BaseAgent):
             return AgentResult(success=False, error=f"Invalid input: {e}")
 
         settings = get_settings()
-        top_n = inputs.top_n or settings.dossier_top_n
-        top_matches = sorted(inputs.matches, key=lambda m: m.get("match_score", 0), reverse=True)[:top_n]
+        nct_id = inputs.nct_id
+        match = inputs.match
 
-        matches_summary = "\n".join(
-            f"- {m['nct_id']}: {m.get('brief_title', '?')[:60]} (score: {m.get('match_score', '?')})"
-            for m in top_matches
-        )
+        trial_summary = f"- {nct_id}: {match.get('brief_title', '?')[:60]} (score: {match.get('match_score', '?')})"
 
         scratchpad = Scratchpad(
             state={
                 "patient_data": inputs.patient,
-                "matches": {m["nct_id"]: m for m in top_matches},
+                "matches": {nct_id: match},
                 "sections": {},
                 "settings": settings,
             }
@@ -652,7 +652,7 @@ class DossierAgent(BaseAgent):
             orchestrator_prompt_template=DOSSIER_ORCHESTRATOR_PROMPT,
             prompt_vars={
                 "patient_json": json.dumps(inputs.patient, indent=2),
-                "matches_summary": matches_summary,
+                "matches_summary": trial_summary,
             },
             action_handlers=handlers,
             scratchpad=scratchpad,
@@ -660,12 +660,13 @@ class DossierAgent(BaseAgent):
             tool_definitions=DOSSIER_TOOLS,
         )
 
-        # Assemble dossier from completed analyses
+        # Assemble dossier from completed analysis
         sections = list(scratchpad.state.get("sections", {}).values())
         total_tokens = scratchpad.total_token_usage
         dossier = {
-            "patient_summary": ctx.input_data.get("patient_summary", ""),
+            "patient_summary": inputs.patient_summary,
             "generated_at": datetime.now(timezone.utc).isoformat(),
+            "nct_id": nct_id,
             "sections": sections,
         }
 
@@ -679,7 +680,10 @@ class DossierAgent(BaseAgent):
                     "total_tokens": total_tokens.total_tokens,
                 },
             },
-            gate_request=GateRequest(gate_type="dossier_review", requested_data={"dossier": dossier}),
+            gate_request=GateRequest(
+                gate_type="dossier_review",
+                requested_data={"dossier": dossier, "nct_id": nct_id},
+            ),
         )
 
     async def _handle_deep_analyze(

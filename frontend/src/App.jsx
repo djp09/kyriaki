@@ -47,26 +47,23 @@ export default function App() {
 
   // Task tracking
   const [matchTaskId, setMatchTaskId] = useState(null);
-  const [dossierTaskId, setDossierTaskId] = useState(null);
-  const [dossierData, setDossierData] = useState(null);
-  const [dossierStatus, setDossierStatus] = useState(null);
-  const [gateId, setGateId] = useState(null);
-  const [approvalStatus, setApprovalStatus] = useState(null);
 
-  // Enrollment pipeline tracking
-  const [enrollmentTaskId, setEnrollmentTaskId] = useState(null);
-  const [enrollmentData, setEnrollmentData] = useState(null);
-  const [enrollmentStatus, setEnrollmentStatus] = useState(null); // null | "loading" | "done"
-  const [enrollmentGateId, setEnrollmentGateId] = useState(null);
-  const [outreachTaskId, setOutreachTaskId] = useState(null);
-  const [outreachData, setOutreachData] = useState(null);
-  const [outreachStatus, setOutreachStatus] = useState(null);
+  // Per-trial dossier/enrollment/outreach state
+  // Map<nct_id, { taskId, data, status, gateId, approvalStatus,
+  //               enrollmentTaskId, enrollmentData, enrollmentStatus, enrollmentGateId,
+  //               outreachTaskId, outreachData, outreachStatus }>
+  const [trialPipelines, setTrialPipelines] = useState({});
+  const [viewingDossierNctId, setViewingDossierNctId] = useState(null);
+
+  const updateTrialPipeline = useCallback((nctId, updates) => {
+    setTrialPipelines((prev) => ({
+      ...prev,
+      [nctId]: { ...prev[nctId], ...updates },
+    }));
+  }, []);
 
   // Pollers
   const matchPoller = useTaskPoller(matchTaskId, { enabled: view === "loading" });
-  const dossierPoller = useTaskPoller(dossierTaskId, { enabled: dossierStatus === "loading" });
-  const enrollmentPoller = useTaskPoller(enrollmentTaskId, { enabled: enrollmentStatus === "loading" });
-  const outreachPoller = useTaskPoller(outreachTaskId, { enabled: outreachStatus === "loading" });
 
   // Fallback message cycling
   useEffect(() => {
@@ -101,64 +98,83 @@ export default function App() {
     }).catch((err) => { setError(err.message); setView("intake"); setMatchTaskId(null); });
   }, [matchPoller.isComplete, matchPoller.isError, matchPoller.task, matchTaskId]);
 
-  // Dossier completion
+  // Per-trial dossier polling
   useEffect(() => {
-    if (!dossierPoller.isComplete || !dossierPoller.task) return;
-    if (dossierPoller.isError) {
-      setDossierStatus("error");
-      setError("Dossier failed: " + (dossierPoller.task?.error || "unknown"));
-      setDossierTaskId(null);
-      return;
-    }
-    getTask(dossierPoller.task.task_id || dossierTaskId).then((t) => {
-      setDossierData(t.output_data?.dossier || null);
-      if (t.gates && t.gates.length > 0) setGateId(t.gates[0].gate_id);
-      setDossierStatus("done");
-      setDossierTaskId(null);
-    }).catch((err) => { setDossierStatus("error"); setError(err.message); setDossierTaskId(null); });
-  }, [dossierPoller.isComplete, dossierPoller.isError, dossierPoller.task, dossierTaskId]);
+    const intervals = {};
+    Object.entries(trialPipelines).forEach(([nctId, p]) => {
+      if (p.status === "loading" && p.taskId) {
+        const poll = async () => {
+          try {
+            const t = await getTask(p.taskId);
+            if (["completed", "blocked", "failed"].includes(t.status)) {
+              updateTrialPipeline(nctId, {
+                data: t.output_data?.dossier || null,
+                gateId: t.gates?.[0]?.gate_id || null,
+                status: t.status === "failed" ? "error" : "done",
+                taskId: null,
+              });
+            }
+          } catch { /* retry on next interval */ }
+        };
+        intervals[nctId] = setInterval(poll, 2500);
+      }
+    });
+    return () => Object.values(intervals).forEach(clearInterval);
+  }, [trialPipelines, updateTrialPipeline]);
 
-  // Enrollment completion (auto-started after dossier approval)
+  // Per-trial enrollment polling
   useEffect(() => {
-    if (!enrollmentPoller.isComplete || !enrollmentPoller.task) return;
-    if (enrollmentPoller.isError) {
-      setEnrollmentStatus("error");
-      setError("Enrollment preparation failed.");
-      setEnrollmentTaskId(null);
-      return;
-    }
-    getTask(enrollmentPoller.task.task_id || enrollmentTaskId).then((t) => {
-      setEnrollmentData(t.output_data || null);
-      if (t.gates && t.gates.length > 0) setEnrollmentGateId(t.gates[0].gate_id);
-      setEnrollmentStatus("done");
-      setEnrollmentTaskId(null);
-    }).catch(() => { setEnrollmentStatus("error"); setEnrollmentTaskId(null); });
-  }, [enrollmentPoller.isComplete, enrollmentPoller.isError, enrollmentPoller.task, enrollmentTaskId]);
+    const intervals = {};
+    Object.entries(trialPipelines).forEach(([nctId, p]) => {
+      if (p.enrollmentStatus === "loading" && p.enrollmentTaskId) {
+        const poll = async () => {
+          try {
+            const t = await getTask(p.enrollmentTaskId);
+            if (["completed", "blocked", "failed"].includes(t.status)) {
+              updateTrialPipeline(nctId, {
+                enrollmentData: t.output_data || null,
+                enrollmentGateId: t.gates?.[0]?.gate_id || null,
+                enrollmentStatus: t.status === "failed" ? "error" : "done",
+                enrollmentTaskId: null,
+              });
+            }
+          } catch { /* retry */ }
+        };
+        intervals[nctId] = setInterval(poll, 2500);
+      }
+    });
+    return () => Object.values(intervals).forEach(clearInterval);
+  }, [trialPipelines, updateTrialPipeline]);
 
-  // Outreach completion (auto-started after enrollment approval)
+  // Per-trial outreach polling
   useEffect(() => {
-    if (!outreachPoller.isComplete || !outreachPoller.task) return;
-    if (outreachPoller.isError) {
-      setOutreachStatus("error");
-      setError("Outreach preparation failed.");
-      setOutreachTaskId(null);
-      return;
-    }
-    getTask(outreachPoller.task.task_id || outreachTaskId).then((t) => {
-      setOutreachData(t.output_data || null);
-      setOutreachStatus("done");
-      setOutreachTaskId(null);
-    }).catch(() => { setOutreachStatus("error"); setOutreachTaskId(null); });
-  }, [outreachPoller.isComplete, outreachPoller.isError, outreachPoller.task, outreachTaskId]);
+    const intervals = {};
+    Object.entries(trialPipelines).forEach(([nctId, p]) => {
+      if (p.outreachStatus === "loading" && p.outreachTaskId) {
+        const poll = async () => {
+          try {
+            const t = await getTask(p.outreachTaskId);
+            if (["completed", "blocked", "failed"].includes(t.status)) {
+              updateTrialPipeline(nctId, {
+                outreachData: t.output_data || null,
+                outreachStatus: t.status === "failed" ? "error" : "done",
+                outreachTaskId: null,
+              });
+            }
+          } catch { /* retry */ }
+        };
+        intervals[nctId] = setInterval(poll, 2500);
+      }
+    });
+    return () => Object.values(intervals).forEach(clearInterval);
+  }, [trialPipelines, updateTrialPipeline]);
 
   // --- Handlers ---
 
   const handleSubmit = async (patient) => {
     setView("loading");
     setError(null);
-    setDossierStatus(null); setDossierData(null); setGateId(null); setApprovalStatus(null);
-    setEnrollmentStatus(null); setEnrollmentData(null); setEnrollmentGateId(null);
-    setOutreachStatus(null); setOutreachData(null);
+    setTrialPipelines({});
 
     try {
       const task = await startMatch(patient);
@@ -172,57 +188,70 @@ export default function App() {
     } catch (err) { setError(err.message); setView("intake"); }
   };
 
-  const handleDossier = async () => {
+  const handleAnalyzeTrial = async (nctId) => {
     if (!results?.task_id) return;
-    setDossierStatus("loading");
+    updateTrialPipeline(nctId, { status: "loading" });
     try {
-      const task = await startDossier(results.task_id, 3);
-      if (task.status === "blocked" && task.output_data) {
-        setDossierData(task.output_data?.dossier || null);
-        if (task.gates && task.gates.length > 0) setGateId(task.gates[0].gate_id);
-        setDossierStatus("done");
-      } else { setDossierTaskId(task.task_id); }
-    } catch (err) { setDossierStatus("error"); setError("Dossier failed: " + err.message); }
-  };
-
-  const handleViewDossier = () => { if (dossierData) setView("dossier"); };
-
-  const handleApproveDossier = async () => {
-    if (!gateId || !dossierData) return;
-    setApprovalStatus("approving");
-    // Find the top trial NCT ID from the dossier to chain enrollment
-    const topSection = dossierData.sections?.[0];
-    const chainTrial = topSection?.nct_id || null;
-    try {
-      await resolveGate(gateId, "approved", "Navigator", "Reviewed and approved", chainTrial);
-      setApprovalStatus("approved");
-      // If we chained, start polling for the enrollment task
-      if (chainTrial) {
-        setEnrollmentStatus("loading");
-        // Poll task list to find the enrollment task that was auto-created
-        setTimeout(async () => {
-          try {
-            const tasks = await fetch("/api/agents/tasks").then(r => r.json());
-            const enrollTask = tasks.find(t => t.agent_type === "enrollment" && t.status !== "completed");
-            if (enrollTask) setEnrollmentTaskId(enrollTask.task_id);
-          } catch { /* will retry via next poll */ }
-        }, 2000);
+      const task = await startDossier(results.task_id, nctId);
+      if ((task.status === "blocked" || task.status === "completed") && task.output_data) {
+        updateTrialPipeline(nctId, {
+          data: task.output_data?.dossier || null,
+          gateId: task.gates?.[0]?.gate_id || null,
+          status: "done",
+        });
+      } else {
+        updateTrialPipeline(nctId, { taskId: task.task_id });
       }
-    } catch (err) { setApprovalStatus(null); setError("Failed to approve: " + err.message); }
+    } catch (err) {
+      updateTrialPipeline(nctId, { status: "error" });
+      setError("Analysis failed: " + err.message);
+    }
   };
 
-  const handleApproveEnrollment = async () => {
-    if (!enrollmentGateId) return;
+  const handleViewDossier = (nctId) => {
+    const p = trialPipelines[nctId];
+    if (p?.data) {
+      setViewingDossierNctId(nctId);
+      setView("dossier");
+    }
+  };
+
+  const handleProceedToEnrollment = async (nctId) => {
+    const p = trialPipelines[nctId];
+    if (!p?.gateId) return;
+    updateTrialPipeline(nctId, { approvalStatus: "approving" });
     try {
-      await resolveGate(enrollmentGateId, "approved", "Navigator", "Packet approved, proceed with outreach");
-      setEnrollmentStatus("approved");
-      // Poll for auto-chained outreach task
-      setOutreachStatus("loading");
+      await resolveGate(p.gateId, "approved", "Navigator", "Proceed to enrollment", nctId);
+      updateTrialPipeline(nctId, { approvalStatus: "approved", enrollmentStatus: "loading" });
+      // Poll for auto-chained enrollment task
       setTimeout(async () => {
         try {
-          const tasks = await fetch("/api/agents/tasks").then(r => r.json());
-          const outTask = tasks.find(t => t.agent_type === "outreach" && t.status !== "completed");
-          if (outTask) setOutreachTaskId(outTask.task_id);
+          const tasks = await fetch("/api/agents/tasks").then((r) => r.json());
+          const enrollTask = tasks.find(
+            (t) => t.agent_type === "enrollment" && t.status !== "completed" && t.status !== "failed"
+          );
+          if (enrollTask) updateTrialPipeline(nctId, { enrollmentTaskId: enrollTask.task_id });
+        } catch { /* retry */ }
+      }, 2000);
+    } catch (err) {
+      updateTrialPipeline(nctId, { approvalStatus: null });
+      setError("Failed to proceed: " + err.message);
+    }
+  };
+
+  const handleApproveEnrollment = async (nctId) => {
+    const p = trialPipelines[nctId];
+    if (!p?.enrollmentGateId) return;
+    try {
+      await resolveGate(p.enrollmentGateId, "approved", "Navigator", "Packet approved, proceed with outreach");
+      updateTrialPipeline(nctId, { enrollmentStatus: "approved", outreachStatus: "loading" });
+      setTimeout(async () => {
+        try {
+          const tasks = await fetch("/api/agents/tasks").then((r) => r.json());
+          const outTask = tasks.find(
+            (t) => t.agent_type === "outreach" && t.status !== "completed" && t.status !== "failed"
+          );
+          if (outTask) updateTrialPipeline(nctId, { outreachTaskId: outTask.task_id });
         } catch { /* retry */ }
       }, 2000);
     } catch (err) { setError("Failed to approve enrollment: " + err.message); }
@@ -240,31 +269,30 @@ export default function App() {
 
   const handleRetry = useCallback(() => setError(null), []);
   const handleSelectTrial = (trial) => { setSelectedTrial(trial); setView("detail"); };
-  const handleBackToResults = () => { setSelectedTrial(null); setView("results"); };
+  const handleBackToResults = () => { setSelectedTrial(null); setViewingDossierNctId(null); setView("results"); };
 
   const handleStartOver = () => {
     setResults(null); setSelectedTrial(null); setError(null); setPrefill(null);
-    setDossierStatus(null); setDossierData(null); setMatchTaskId(null); setDossierTaskId(null);
-    setGateId(null); setApprovalStatus(null);
-    setEnrollmentStatus(null); setEnrollmentData(null); setEnrollmentGateId(null); setEnrollmentTaskId(null);
-    setOutreachStatus(null); setOutreachData(null); setOutreachTaskId(null);
+    setMatchTaskId(null); setTrialPipelines({}); setViewingDossierNctId(null);
     setView("upload");
   };
 
   // Active agent for loading indicator
-  const activeAgent = outreachStatus === "loading" ? "OutreachAgent"
-    : enrollmentStatus === "loading" ? "EnrollmentAgent"
-    : dossierStatus === "loading" ? "DossierAgent"
+  const anyLoading = Object.values(trialPipelines).find(
+    (p) => p.status === "loading" || p.enrollmentStatus === "loading" || p.outreachStatus === "loading"
+  );
+  const activeAgent = anyLoading
+    ? (anyLoading.outreachStatus === "loading" ? "OutreachAgent"
+      : anyLoading.enrollmentStatus === "loading" ? "EnrollmentAgent"
+      : "DossierAgent")
     : matchTaskId ? "MatchingAgent" : null;
 
-  const activeEvents = outreachStatus === "loading" ? outreachPoller.events
-    : enrollmentStatus === "loading" ? enrollmentPoller.events
-    : dossierStatus === "loading" ? dossierPoller.events
-    : matchPoller.events;
-
-  const realMsg = progressMessage(activeEvents);
+  const realMsg = progressMessage(matchPoller.events);
   const loadingMessage = realMsg || FALLBACK_MESSAGES[fallbackMsgIndex];
   const progressPct = realMsg ? null : ((fallbackMsgIndex + 1) / FALLBACK_MESSAGES.length) * 100;
+
+  // Current dossier data for DossierView
+  const viewingPipeline = viewingDossierNctId ? trialPipelines[viewingDossierNctId] : null;
 
   return (
     <div className="app">
@@ -292,7 +320,7 @@ export default function App() {
       {activeAgent && view !== "loading" && (
         <div className="agent-badge" style={{ textAlign: "center", margin: "0 auto 1rem" }}>
           <span className="agent-dot" />
-          {activeAgent} running — {realMsg || "processing..."}
+          {activeAgent} running — processing...
         </div>
       )}
 
@@ -328,14 +356,11 @@ export default function App() {
             data={results}
             onSelect={handleSelectTrial}
             onBack={handleStartOver}
-            onDossier={handleDossier}
+            onAnalyzeTrial={handleAnalyzeTrial}
             onViewDossier={handleViewDossier}
-            dossierStatus={dossierStatus}
-            enrollmentStatus={enrollmentStatus}
-            enrollmentData={enrollmentData}
+            onProceedToEnrollment={handleProceedToEnrollment}
             onApproveEnrollment={handleApproveEnrollment}
-            outreachStatus={outreachStatus}
-            outreachData={outreachData}
+            trialPipelines={trialPipelines}
           />
         )}
 
@@ -343,12 +368,17 @@ export default function App() {
           <TrialDetail trial={selectedTrial} onBack={handleBackToResults} />
         )}
 
-        {view === "dossier" && dossierData && (
+        {view === "dossier" && viewingPipeline?.data && (
           <DossierView
-            dossier={dossierData}
+            dossier={viewingPipeline.data}
+            nctId={viewingDossierNctId}
             onBack={handleBackToResults}
-            onApprove={gateId && approvalStatus !== "approved" ? handleApproveDossier : null}
-            approvalStatus={approvalStatus}
+            onProceedToEnrollment={
+              viewingPipeline.gateId && viewingPipeline.approvalStatus !== "approved"
+                ? () => handleProceedToEnrollment(viewingDossierNctId)
+                : null
+            }
+            approvalStatus={viewingPipeline.approvalStatus}
           />
         )}
       </div>

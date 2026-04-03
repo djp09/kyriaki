@@ -11,7 +11,7 @@ function scoreBadgeClass(score) {
   return "score-badge score-low";
 }
 
-export default function DossierView({ dossier, onBack, onApprove, approvalStatus }) {
+export default function DossierView({ dossier, nctId, onBack, onProceedToEnrollment, approvalStatus }) {
   if (!dossier) return null;
 
   return (
@@ -141,16 +141,16 @@ export default function DossierView({ dossier, onBack, onApprove, approvalStatus
         {approvalStatus === "approved" ? (
           <div className="approval-badge" style={{ marginTop: "1rem" }}>
             <span className="criterion-status status-met" style={{ display: "inline-flex", width: "22px", height: "22px", fontSize: "0.7rem", verticalAlign: "middle", marginRight: "0.5rem" }}>{"\u2713"}</span>
-            <strong>Reviewed and approved</strong>
+            <strong>Enrollment started</strong>
           </div>
-        ) : onApprove && (
+        ) : onProceedToEnrollment && (
           <button
             className="btn btn-primary"
-            onClick={onApprove}
+            onClick={onProceedToEnrollment}
             disabled={approvalStatus === "approving"}
             style={{ marginTop: "1rem" }}
           >
-            {approvalStatus === "approving" ? "Approving..." : "Mark as Reviewed"}
+            {approvalStatus === "approving" ? "Starting enrollment..." : "Proceed to Enrollment"}
           </button>
         )}
         <button className="btn btn-secondary" onClick={onBack} style={{ marginTop: "1rem", marginLeft: "0.75rem" }}>

@@ -10,10 +10,99 @@ function scoreLabel(score) {
   return "Low match";
 }
 
+function TrialCardActions({ nctId, pipeline, onAnalyzeTrial, onViewDossier, onProceedToEnrollment, onApproveEnrollment }) {
+  if (!pipeline) {
+    return (
+      <div className="trial-card-actions" onClick={(e) => e.stopPropagation()}>
+        <button className="btn btn-primary btn-sm" onClick={() => onAnalyzeTrial(nctId)}>
+          Analyze Trial
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="trial-card-actions" onClick={(e) => e.stopPropagation()}>
+      {pipeline.status === "loading" && (
+        <span className="agent-badge" style={{ fontSize: "0.8rem" }}>
+          <span className="agent-dot" />
+          Analyzing...
+        </span>
+      )}
+      {pipeline.status === "error" && (
+        <>
+          <span style={{ color: "#ef4444", fontSize: "0.8rem" }}>Analysis failed</span>
+          <button className="btn btn-secondary btn-sm" onClick={() => onAnalyzeTrial(nctId)}>
+            Retry
+          </button>
+        </>
+      )}
+      {pipeline.status === "done" && (
+        <>
+          <button className="btn btn-secondary btn-sm" onClick={() => onViewDossier(nctId)}>
+            View Dossier
+          </button>
+          {!pipeline.approvalStatus && (
+            <button className="btn btn-primary btn-sm" onClick={() => onProceedToEnrollment(nctId)}>
+              Proceed to Enrollment
+            </button>
+          )}
+          {pipeline.approvalStatus === "approving" && (
+            <span className="agent-badge" style={{ fontSize: "0.8rem" }}>
+              <span className="agent-dot" />
+              Starting enrollment...
+            </span>
+          )}
+        </>
+      )}
+      {pipeline.approvalStatus === "approved" && (
+        <>
+          {pipeline.enrollmentStatus === "loading" && (
+            <span className="agent-badge" style={{ fontSize: "0.8rem" }}>
+              <span className="agent-dot" />
+              Preparing enrollment...
+            </span>
+          )}
+          {pipeline.enrollmentStatus === "done" && (
+            <>
+              <span className="criterion-status status-met" style={{ display: "inline-flex", width: "18px", height: "18px", fontSize: "0.65rem" }}>{"\u2713"}</span>
+              <span style={{ fontSize: "0.8rem", color: "#059669" }}>Enrollment ready</span>
+              {pipeline.enrollmentGateId && pipeline.enrollmentStatus !== "approved" && (
+                <button className="btn btn-primary btn-sm" onClick={() => onApproveEnrollment(nctId)}>
+                  Approve &amp; Send to Site
+                </button>
+              )}
+            </>
+          )}
+          {pipeline.enrollmentStatus === "approved" && (
+            <>
+              <span className="criterion-status status-met" style={{ display: "inline-flex", width: "18px", height: "18px", fontSize: "0.65rem" }}>{"\u2713"}</span>
+              <span style={{ fontSize: "0.8rem", color: "#059669" }}>Enrollment sent</span>
+            </>
+          )}
+          {pipeline.outreachStatus === "loading" && (
+            <span className="agent-badge" style={{ fontSize: "0.8rem" }}>
+              <span className="agent-dot" />
+              Outreach in progress...
+            </span>
+          )}
+          {pipeline.outreachStatus === "done" && pipeline.outreachData && (
+            <>
+              <span className="criterion-status status-met" style={{ display: "inline-flex", width: "18px", height: "18px", fontSize: "0.65rem" }}>{"\u2713"}</span>
+              <span style={{ fontSize: "0.8rem", color: "#059669" }}>
+                Outreach ready ({pipeline.outreachData.contacts?.length || 0} contacts)
+              </span>
+            </>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 export default function TrialResults({
-  data, onSelect, onBack, onDossier, onViewDossier, dossierStatus,
-  enrollmentStatus, enrollmentData, onApproveEnrollment,
-  outreachStatus, outreachData,
+  data, onSelect, onBack, onAnalyzeTrial, onViewDossier, onProceedToEnrollment,
+  onApproveEnrollment, trialPipelines,
 }) {
   return (
     <div className="results fade-in">
@@ -80,99 +169,20 @@ export default function TrialResults({
                 )}
               </div>
               <div className="trial-explanation">{trial.match_explanation}</div>
-              <div className="trial-card-cta" aria-hidden="true">
-                View details
-                <svg viewBox="0 0 20 20" fill="currentColor" width="14" height="14">
-                  <path fillRule="evenodd" d="M7.21 14.77a.75.75 0 01.02-1.06L11.168 10 7.23 6.29a.75.75 0 111.04-1.08l4.5 4.25a.75.75 0 010 1.08l-4.5 4.25a.75.75 0 01-1.06-.02z" clipRule="evenodd" />
-                </svg>
-              </div>
+
+              <TrialCardActions
+                nctId={trial.nct_id}
+                pipeline={trialPipelines[trial.nct_id]}
+                onAnalyzeTrial={onAnalyzeTrial}
+                onViewDossier={onViewDossier}
+                onProceedToEnrollment={onProceedToEnrollment}
+                onApproveEnrollment={onApproveEnrollment}
+              />
             </div>
           ))}
 
-          {/* --- Pipeline progress section --- */}
           <div className="results-footer">
-            {/* Step 1: Dossier */}
-            {dossierStatus === "loading" && (
-              <div className="agent-badge" style={{ marginBottom: "1rem" }}>
-                <span className="agent-dot" />
-                DossierAgent running — deep eligibility analysis
-              </div>
-            )}
-            {data.task_id && onDossier && !dossierStatus && (
-              <button className="btn btn-primary" onClick={onDossier}>
-                Generate Eligibility Dossier
-              </button>
-            )}
-            {dossierStatus === "done" && onViewDossier && (
-              <button className="btn btn-primary" onClick={onViewDossier}>
-                View Eligibility Dossier
-              </button>
-            )}
-
-            {/* Step 2: Enrollment (shows after dossier approved) */}
-            {enrollmentStatus === "loading" && (
-              <div className="agent-badge" style={{ marginTop: "1rem" }}>
-                <span className="agent-dot" />
-                EnrollmentAgent running — preparing enrollment packet
-              </div>
-            )}
-            {enrollmentStatus === "done" && enrollmentData && (
-              <div className="pipeline-step" style={{ marginTop: "1.25rem" }}>
-                <div className="pipeline-step-header">
-                  <span className="criterion-status status-met" style={{ display: "inline-flex", width: "22px", height: "22px", fontSize: "0.7rem" }}>{"\u2713"}</span>
-                  <strong>Enrollment Packet Ready</strong>
-                </div>
-                <div className="pipeline-step-detail">
-                  {enrollmentData.patient_packet?.screening_checklist && (
-                    <p style={{ fontSize: "0.85rem", color: "#6b7280", margin: "0.5rem 0" }}>
-                      {enrollmentData.patient_packet.screening_checklist.length} screening items identified
-                    </p>
-                  )}
-                  {onApproveEnrollment && (
-                    <button className="btn btn-primary btn-sm" onClick={onApproveEnrollment} style={{ marginTop: "0.5rem" }}>
-                      Approve &amp; Send to Trial Site
-                    </button>
-                  )}
-                </div>
-              </div>
-            )}
-            {enrollmentStatus === "approved" && (
-              <div className="pipeline-step" style={{ marginTop: "1rem" }}>
-                <div className="approval-badge">
-                  <span className="criterion-status status-met" style={{ display: "inline-flex", width: "22px", height: "22px", fontSize: "0.7rem", verticalAlign: "middle", marginRight: "0.5rem" }}>{"\u2713"}</span>
-                  <strong>Enrollment approved</strong>
-                </div>
-              </div>
-            )}
-
-            {/* Step 3: Outreach (shows after enrollment approved) */}
-            {outreachStatus === "loading" && (
-              <div className="agent-badge" style={{ marginTop: "1rem" }}>
-                <span className="agent-dot" />
-                OutreachAgent running — contacting trial site
-              </div>
-            )}
-            {outreachStatus === "done" && outreachData && (
-              <div className="pipeline-step" style={{ marginTop: "1.25rem" }}>
-                <div className="pipeline-step-header">
-                  <span className="criterion-status status-met" style={{ display: "inline-flex", width: "22px", height: "22px", fontSize: "0.7rem" }}>{"\u2713"}</span>
-                  <strong>Outreach Ready</strong>
-                </div>
-                <div className="pipeline-step-detail">
-                  <p style={{ fontSize: "0.85rem", color: "#6b7280", margin: "0.5rem 0" }}>
-                    {outreachData.contacts?.length || 0} site contacts found
-                    {outreachData.contacts?.[0]?.facility && ` at ${outreachData.contacts[0].facility}`}
-                  </p>
-                  <p style={{ fontSize: "0.85rem", color: "#4b5563", margin: "0.5rem 0", fontStyle: "italic" }}>
-                    &ldquo;{outreachData.subject_line}&rdquo;
-                  </p>
-                </div>
-              </div>
-            )}
-
-            <div style={{ marginTop: "1.5rem" }}>
-              <button className="btn btn-secondary" onClick={onBack}>Start New Search</button>
-            </div>
+            <button className="btn btn-secondary" onClick={onBack}>Start New Search</button>
           </div>
         </>
       )}

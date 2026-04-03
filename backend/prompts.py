@@ -55,18 +55,18 @@ You are an oncology eligibility analyst strategist. Your goal is to produce the 
 ## Patient Profile
 {patient_json}
 
-## Top Matches to Analyze
+## Trial to Analyze
 {matches_summary}
 
 ## Available Actions
 
-1. **deep_analyze** — Run deep criterion-by-criterion analysis on a specific trial
+1. **deep_analyze** — Run deep criterion-by-criterion analysis on this trial
    Params: {{"nct_id": "<trial to analyze>"}}
 
 2. **investigate_criterion** — Fetch fresh trial data to resolve an ambiguous criterion
    Params: {{"nct_id": "<trial>", "question": "<what to investigate>"}}
 
-3. **finish** — Assemble final dossier from completed analyses
+3. **finish** — Assemble final dossier from completed analysis
    Params: {{"reason": "<why stopping>"}}
 
 ## Budget Remaining
@@ -77,10 +77,9 @@ You are an oncology eligibility analyst strategist. Your goal is to produce the 
 {scratchpad}
 
 ## Strategy Guidelines
-- Analyze the highest-scoring matches first — they are most likely to be actionable.
-- If a deep analysis reveals an ambiguous criterion (e.g., "prior immunotherapy" and patient had pembrolizumab — does that count?), investigate by fetching fresh trial data.
-- If a trial's revised score drops below 20 after deep analysis, note it but move on to the next trial.
-- Once all top matches are analyzed, finish.
+- Start by running deep_analyze on the trial immediately — this is the primary task.
+- If the deep analysis reveals an ambiguous criterion (e.g., "prior immunotherapy" and patient had pembrolizumab — does that count?), investigate by fetching fresh trial data.
+- After analysis is complete, finish.
 
 Think step by step, then call the appropriate tool.
 """

@@ -76,11 +76,11 @@ export async function agentMatch(patient, maxResults = 10) {
   };
 }
 
-export async function agentDossier(matchingTaskId, topN = 3) {
+export async function agentDossier(matchingTaskId, nctId) {
   return request(`${BASE}/agents/dossier`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ matching_task_id: matchingTaskId, top_n: topN }),
+    body: JSON.stringify({ matching_task_id: matchingTaskId, nct_id: nctId }),
   });
 }
 
@@ -108,11 +108,11 @@ export async function startMatch(patient, maxResults = 10) {
   });
 }
 
-export async function startDossier(matchingTaskId, topN = 3) {
+export async function startDossier(matchingTaskId, nctId) {
   return request(`${BASE}/agents/dossier`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ matching_task_id: matchingTaskId, top_n: topN }),
+    body: JSON.stringify({ matching_task_id: matchingTaskId, nct_id: nctId }),
   });
 }
 

@@ -71,12 +71,12 @@ class MatchingInput(BaseModel):
 
 
 class DossierInput(BaseModel):
-    """Input schema for DossierAgent."""
+    """Input schema for DossierAgent — single trial analysis."""
 
     patient: dict
-    matches: list[dict]
+    match: dict  # single match to deep-analyze
+    nct_id: str
     patient_summary: str = ""
-    top_n: int = Field(default=3, ge=1, le=10)
 
 
 class EnrollmentInput(BaseModel):
@@ -117,7 +117,7 @@ class TaskResponse(BaseModel):
 
 class DossierRequest(BaseModel):
     matching_task_id: str
-    top_n: int = Field(default=3, ge=1, le=10)
+    nct_id: str  # specific trial to analyze
 
 
 class GateResolution(BaseModel):
