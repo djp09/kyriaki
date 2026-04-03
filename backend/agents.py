@@ -385,7 +385,13 @@ class MatchingAgent(BaseAgent):
     async def _handle_analyze_batch(
         self, decision: AgentDecision, scratchpad: Scratchpad, budget: AgentBudget
     ) -> tuple[str, bool]:
-        """Handle analyze_batch — run eligibility analysis on unanalyzed trials."""
+        """Handle analyze_batch — two-tier analysis for speed.
+
+        Tier 1: Fast pre-screen ALL unanalyzed trials in one Claude call (~5s).
+        Tier 2: Deep criterion-level analysis on only the HIGH-tier trials (~5s each).
+        """
+        from prompts import PRESCREEN_PROMPT
+
         pool = scratchpad.state["trials_pool"]
         analyses = scratchpad.state["analyses"]
         patient = scratchpad.state["patient"]
@@ -396,21 +402,67 @@ class MatchingAgent(BaseAgent):
         if not unanalyzed:
             return "No unanalyzed trials in pool", False
 
-        # Respect budget — cap at 10 trials per batch for responsiveness
-        max_batch = min(budget.analyses_remaining, 10)
-        to_analyze = list(unanalyzed.values())[:max_batch]
-        if not to_analyze:
-            return "Analysis budget exhausted", False
+        # --- Tier 1: Fast pre-screen in a single call ---
+        trials_list_lines = []
+        for trial in unanalyzed.values():
+            trials_list_lines.append(
+                f"- **{trial['nct_id']}**: {trial['brief_title']}\n"
+                f"  Phase: {trial['phase']} | Conditions: {', '.join(trial.get('conditions', []))}\n"
+                f"  Summary: {trial['brief_summary'][:150]}"
+            )
+
+        patient_vars = format_patient_for_prompt(patient)
+        prescreen_prompt = PRESCREEN_PROMPT.format(
+            **patient_vars,
+            trials_list="\n".join(trials_list_lines),
+        )
+
+        prescreen_result = await claude_json_call(prescreen_prompt, max_tokens=800)
+        if not prescreen_result.success:
+            # Fallback: analyze first 5 without pre-screening
+            high_tier_ids = list(unanalyzed.keys())[:5]
+        else:
+            rankings = prescreen_result.data.get("rankings", [])
+            high_tier_ids = [r["nct_id"] for r in rankings if r.get("tier") == "HIGH"]
+            low_count = len(rankings) - len(high_tier_ids)
+            logger.info(
+                "matching.prescreen",
+                total=len(rankings),
+                high=len(high_tier_ids),
+                low=low_count,
+            )
+
+            # Mark LOW-tier trials as analyzed with score 0 so we don't re-analyze
+            for r in rankings:
+                if r.get("tier") == "LOW" and r["nct_id"] not in analyses:
+                    analyses[r["nct_id"]] = {
+                        "match_score": 0,
+                        "match_tier": "EXCLUDED",
+                        "match_explanation": f"Pre-screen: {r.get('reason', 'Not relevant')}",
+                        "inclusion_evaluations": [],
+                        "exclusion_evaluations": [],
+                        "flags_for_oncologist": [],
+                        "criteria_met": 0,
+                        "criteria_not_met": 0,
+                        "criteria_unknown": 0,
+                        "criteria_total": 0,
+                    }
+
+        if not high_tier_ids:
+            return f"Pre-screened {len(unanalyzed)} trials, none passed to deep analysis", True
+
+        # --- Tier 2: Deep criterion-level analysis on HIGH-tier only ---
+        max_deep = min(len(high_tier_ids), budget.analyses_remaining, 5)
+        to_analyze = [unanalyzed[nid] for nid in high_tier_ids[:max_deep] if nid in unanalyzed]
 
         biomarker_context = scratchpad.state.get("biomarker_context", "")
 
         async def analyze_one(trial: dict) -> tuple[str, dict | None]:
-            # Concurrency is managed by AdaptiveConcurrencyLimiter in paced_claude_call
             result = await self._analyze_single_trial(patient, trial, settings, biomarker_context)
             return trial["nct_id"], result
 
         results = await asyncio.gather(*[analyze_one(t) for t in to_analyze])
-        budget.analysis_calls_used += len(to_analyze)
+        budget.analysis_calls_used += len(to_analyze) + 1  # +1 for prescreen
 
         scored = 0
         high_scores = 0
@@ -421,12 +473,15 @@ class MatchingAgent(BaseAgent):
                 if analysis.get("match_score", 0) >= 60:
                     high_scores += 1
 
-        scores = [a.get("match_score", 0) for a in analyses.values()]
+        scores = [a.get("match_score", 0) for a in analyses.values() if a.get("match_score", 0) > 0]
         score_summary = ""
         if scores:
             score_summary = f" Scores: min={min(scores)}, max={max(scores)}, ≥60: {high_scores}"
 
-        return f"Analyzed {len(to_analyze)} trials, {scored} scored.{score_summary}", True
+        return (
+            f"Pre-screened {len(unanalyzed)}, deep-analyzed {len(to_analyze)}, {scored} scored.{score_summary}",
+            True,
+        )
 
     async def _handle_evaluate(
         self, decision: AgentDecision, scratchpad: Scratchpad, budget: AgentBudget

@@ -193,6 +193,30 @@ You are a clinical trial monitoring analyst. Your goal is to detect meaningful c
 Think step by step, then call the appropriate tool.
 """
 
+PRESCREEN_PROMPT = """\
+You are an oncology clinical trial pre-screening specialist. Quickly assess which of these trials are worth detailed analysis for this patient.
+
+## Patient Profile
+- **Cancer Type:** {cancer_type}
+- **Stage:** {cancer_stage}
+- **Biomarkers:** {biomarkers}
+- **Prior Treatments:** {prior_treatments} ({lines_of_therapy} prior line(s))
+- **Age:** {age}, **Sex:** {sex}
+
+## Candidate Trials
+{trials_list}
+
+## Task
+For each trial, assign a relevance tier:
+- **HIGH** — Cancer type matches, no obvious disqualifiers. Worth detailed analysis.
+- **LOW** — Wrong cancer type, wrong stage, clearly ineligible, observational/biobank study, or not a treatment trial.
+
+Be aggressive with LOW — we only want to deeply analyze the most promising matches.
+
+Respond with ONLY a JSON object:
+{{"rankings": [{{"nct_id": "<id>", "tier": "HIGH|LOW", "reason": "<5 words>"}}]}}
+"""
+
 ELIGIBILITY_ANALYSIS_PROMPT = """\
 You are an expert oncology clinical trial eligibility analyst. Evaluate this patient against EACH criterion individually.
 
