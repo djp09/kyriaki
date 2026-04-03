@@ -121,7 +121,9 @@ async def test_matching_agent(session: AsyncSession, patient: PatientProfileDB) 
         # Token tracking validation
         token_usage = task.output_data.get("token_usage")
         if token_usage:
-            print(f"  Token usage:  {token_usage['input_tokens']} in / {token_usage['output_tokens']} out / {token_usage['total_tokens']} total")
+            print(
+                f"  Token usage:  {token_usage['input_tokens']} in / {token_usage['output_tokens']} out / {token_usage['total_tokens']} total"
+            )
         else:
             print("  Token usage:  NOT TRACKED (unexpected)")
 
@@ -187,7 +189,9 @@ async def test_dossier_agent(
         # Token tracking validation
         token_usage = task.output_data.get("token_usage")
         if token_usage:
-            print(f"  Token usage:  {token_usage['input_tokens']} in / {token_usage['output_tokens']} out / {token_usage['total_tokens']} total")
+            print(
+                f"  Token usage:  {token_usage['input_tokens']} in / {token_usage['output_tokens']} out / {token_usage['total_tokens']} total"
+            )
         else:
             print("  Token usage:  NOT TRACKED (unexpected)")
 

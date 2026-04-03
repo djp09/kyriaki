@@ -54,9 +54,17 @@ class DossierPDF(FPDF):
         self.set_y(-20)
         self.set_font("Helvetica", "I", 7)
         self.set_text_color(130, 130, 130)
-        self.cell(0, 5, "This document is for informational purposes only and does not constitute medical advice.", align="C", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
         self.cell(
-            0, 5,
+            0,
+            5,
+            "This document is for informational purposes only and does not constitute medical advice.",
+            align="C",
+            new_x=XPos.LMARGIN,
+            new_y=YPos.NEXT,
+        )
+        self.cell(
+            0,
+            5,
             f"Generated {datetime.now(timezone.utc).strftime('%B %d, %Y')}  |  Page {self.page_no()}/{{nb}}",
             align="C",
         )
@@ -114,10 +122,14 @@ def render_dossier_pdf(
             pdf.label_value("Age / Sex:", f"{patient_data.get('age', '?')} / {patient_data.get('sex', '?')}")
             biomarkers = patient_data.get("biomarkers", [])
             if biomarkers:
-                pdf.label_value("Biomarkers:", ", ".join(biomarkers) if isinstance(biomarkers, list) else str(biomarkers))
+                pdf.label_value(
+                    "Biomarkers:", ", ".join(biomarkers) if isinstance(biomarkers, list) else str(biomarkers)
+                )
             treatments = patient_data.get("prior_treatments", [])
             if treatments:
-                pdf.label_value("Prior Treatments:", ", ".join(treatments) if isinstance(treatments, list) else str(treatments))
+                pdf.label_value(
+                    "Prior Treatments:", ", ".join(treatments) if isinstance(treatments, list) else str(treatments)
+                )
             pdf.label_value("Lines of Therapy:", str(patient_data.get("lines_of_therapy", "N/A")))
             ecog = patient_data.get("ecog_score")
             if ecog is not None:

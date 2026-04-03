@@ -227,8 +227,13 @@ async def run_agent_loop(
         # 2. CHECK: If agent said "finish", record and break
         if decision.action == "finish":
             scratchpad.add(
-                iteration, "finish", decision.reasoning, decision.params,
-                "Agent decided to stop.", True, planning_tokens,
+                iteration,
+                "finish",
+                decision.reasoning,
+                decision.params,
+                "Agent decided to stop.",
+                True,
+                planning_tokens,
             )
             break
 
@@ -269,8 +274,13 @@ async def run_agent_loop(
 
         # 4. OBSERVE: Record results
         scratchpad.add(
-            iteration, decision.action, decision.reasoning, decision.params,
-            result_summary, success, step_tokens if step_tokens.total_tokens > 0 else None,
+            iteration,
+            decision.action,
+            decision.reasoning,
+            decision.params,
+            result_summary,
+            success,
+            step_tokens if step_tokens.total_tokens > 0 else None,
         )
 
         # 5. BUDGET CHECK

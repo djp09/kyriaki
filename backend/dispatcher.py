@@ -266,9 +266,7 @@ async def _execute_task(
         if agent_type == "matching" and result.output_data:
             matches = result.output_data.get("matches", [])
             watch_data = [
-                {"nct_id": m["nct_id"], "last_status": m.get("overall_status", "")}
-                for m in matches
-                if m.get("nct_id")
+                {"nct_id": m["nct_id"], "last_status": m.get("overall_status", "")} for m in matches if m.get("nct_id")
             ]
             if watch_data:
                 await upsert_trial_watches(session, patient_id, watch_data)
@@ -286,11 +284,17 @@ async def _execute_task(
                     logger.info("dispatcher.auto_chain", from_agent="matching", to_agent="dossier")
                     # Note: this is a synchronous dispatch within the same session,
                     # not background, since we're already in a background task
-                    dossier_task = _create_task(session, "dossier", patient_id, {
-                        "patient": input_data.get("patient", {}),
-                        "matches": matches,
-                        "patient_summary": result.output_data.get("patient_summary", ""),
-                    }, task.id)
+                    dossier_task = _create_task(
+                        session,
+                        "dossier",
+                        patient_id,
+                        {
+                            "patient": input_data.get("patient", {}),
+                            "matches": matches,
+                            "patient_summary": result.output_data.get("patient_summary", ""),
+                        },
+                        task.id,
+                    )
                     await session.flush()
                     await _execute_task(session, dossier_task, "dossier", patient_id, dossier_task.input_data)
     else:

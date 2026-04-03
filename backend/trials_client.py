@@ -47,6 +47,7 @@ async def close_http_client() -> None:
         await _shared_client.aclose()
         _shared_client = None
 
+
 FIELDS = ",".join(
     [
         "NCTId",

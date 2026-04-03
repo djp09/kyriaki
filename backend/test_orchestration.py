@@ -948,9 +948,7 @@ class TestPipelineState:
     @pytest.mark.asyncio
     async def test_retry_non_failed_returns_none(self, db_session):
         pid = uuid.uuid4()
-        task = AgentTaskDB(
-            agent_type="matching", status="completed", patient_id=pid, input_data={}, output_data={}
-        )
+        task = AgentTaskDB(agent_type="matching", status="completed", patient_id=pid, input_data={}, output_data={})
         db_session.add(task)
         await db_session.flush()
 
@@ -1007,9 +1005,19 @@ class TestPDFRenderer:
                     "clinical_summary": "Patient meets all major inclusion criteria.",
                     "patient_summary": "This trial is a strong fit for you.",
                     "criteria_analysis": [
-                        {"criterion": "Stage IV NSCLC", "type": "inclusion", "status": "met", "evidence": "Patient has Stage IV NSCLC"},
+                        {
+                            "criterion": "Stage IV NSCLC",
+                            "type": "inclusion",
+                            "status": "met",
+                            "evidence": "Patient has Stage IV NSCLC",
+                        },
                         {"criterion": "EGFR mutation", "type": "inclusion", "status": "met", "evidence": "EGFR+"},
-                        {"criterion": "Active brain mets", "type": "exclusion", "status": "not_triggered", "evidence": "None reported"},
+                        {
+                            "criterion": "Active brain mets",
+                            "type": "exclusion",
+                            "status": "not_triggered",
+                            "evidence": "None reported",
+                        },
                     ],
                     "next_steps": ["Contact trial site", "Get recent labs"],
                     "flags": ["Verify no brain metastases"],

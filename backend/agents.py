@@ -113,7 +113,10 @@ MATCHING_TOOLS = [
         parameters={
             "type": "object",
             "properties": {
-                "query_cond": {"type": "string", "description": "Condition to search (e.g., 'Non-Small Cell Lung Cancer')"},
+                "query_cond": {
+                    "type": "string",
+                    "description": "Condition to search (e.g., 'Non-Small Cell Lung Cancer')",
+                },
                 "query_intr": {"type": "string", "description": "Intervention search (e.g., 'osimertinib')"},
                 "query_term": {"type": "string", "description": "General term search (e.g., 'immunotherapy EGFR')"},
                 "page_size": {"type": "integer", "description": "Max results (10-50)", "default": 20},
