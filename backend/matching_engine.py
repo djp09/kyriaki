@@ -45,10 +45,26 @@ async def _analyze_trial(
     nct_id = trial["nct_id"]
     logger.info("trial.analyze_start", nct_id=nct_id, label=label, title=trial["brief_title"][:60])
 
+    from tools.criteria_parser import parse_eligibility_criteria
+    from tools.scoring import calculate_match_score
+
     eligibility_text = trial["eligibility_criteria"]
     if len(eligibility_text) > 6000:
-        eligibility_text = eligibility_text[:6000] + "\n\n[Eligibility text truncated — focus on the criteria above]"
+        eligibility_text = eligibility_text[:6000] + "\n\n[Eligibility text truncated]"
 
+    # Step 1: Parse criteria
+    parse_result = parse_eligibility_criteria(eligibility_text)
+    if not parse_result.success or parse_result.data["total_criteria"] == 0:
+        return None
+
+    parsed = parse_result.data
+    criteria_lines = []
+    for c in parsed["inclusion_criteria"]:
+        criteria_lines.append(f"[{c['id']}] INCLUSION ({c['category']}): {c['text']}")
+    for c in parsed["exclusion_criteria"]:
+        criteria_lines.append(f"[{c['id']}] EXCLUSION ({c['category']}): {c['text']}")
+
+    # Step 2: Evaluate with Claude
     patient_vars = format_patient_for_prompt(patient)
     prompt_result = render_prompt(
         prompt_name="eligibility_analysis",
@@ -57,30 +73,42 @@ async def _analyze_trial(
         brief_title=trial["brief_title"],
         phase=trial["phase"],
         brief_summary=trial["brief_summary"],
-        eligibility_criteria=eligibility_text,
+        parsed_criteria="\n".join(criteria_lines),
+        enriched_context="",
     )
     if not prompt_result.success:
         logger.error("trial.prompt_render_failed", nct_id=nct_id, error=prompt_result.error)
         return None
-
-    prompt = prompt_result.data
 
     for attempt in range(settings.max_retries + 1):
         try:
             response = await _paced_claude_call(
                 _get_client(),
                 model=settings.claude_model,
-                max_tokens=1500,
-                messages=[{"role": "user", "content": prompt}],
+                max_tokens=2500,
+                messages=[{"role": "user", "content": prompt_result.data}],
             )
             text = response.content[0].text.strip()
             result = _parse_json_response(text)
 
-            if result is not None:
-                if "match_score" not in result:
-                    result["match_score"] = 0
-                logger.info("trial.analyze_complete", nct_id=nct_id, score=result["match_score"])
-                return result
+            if result is not None and result.get("criterion_evaluations"):
+                # Step 3: Score programmatically
+                evals = result["criterion_evaluations"]
+                flags = result.get("flags_for_oncologist", [])
+                score = calculate_match_score(evals, flags)
+                logger.info("trial.analyze_complete", nct_id=nct_id, score=score["score"], tier=score["tier"])
+                return {
+                    "match_score": score["score"],
+                    "match_tier": score["tier"],
+                    "match_explanation": score["match_explanation"],
+                    "inclusion_evaluations": [e for e in evals if e.get("type") == "inclusion"],
+                    "exclusion_evaluations": [e for e in evals if e.get("type") == "exclusion"],
+                    "flags_for_oncologist": flags,
+                    "criteria_met": score["criteria_met"],
+                    "criteria_not_met": score["criteria_not_met"],
+                    "criteria_unknown": score["criteria_unknown"],
+                    "criteria_total": score["criteria_total"],
+                }
 
             if attempt < settings.max_retries:
                 logger.warning("trial.parse_failed", nct_id=nct_id, attempt=attempt + 1)

@@ -46,7 +46,6 @@ from tools.claude_api import (
     claude_json_call,
     claude_text_call,
     evaluate_score,
-    extract_minimal_result,
     get_claude_client,
     paced_claude_call,
     parse_json_response,
@@ -481,19 +480,39 @@ class MatchingAgent(BaseAgent):
     async def _analyze_single_trial(
         self, patient: PatientProfile, trial: dict, settings, biomarker_context: str = ""
     ) -> dict | None:
-        """Analyze a single trial's eligibility with enriched biomarker data."""
+        """Analyze a single trial's eligibility using criterion-level decomposition.
+
+        Pipeline: parse criteria → evaluate per-criterion → score programmatically.
+        """
+        from tools.criteria_parser import parse_eligibility_criteria
+        from tools.scoring import calculate_match_score
+
         nct_id = trial["nct_id"]
         eligibility_text = trial["eligibility_criteria"]
         if len(eligibility_text) > 6000:
-            eligibility_text = (
-                eligibility_text[:6000] + "\n\n[Eligibility text truncated — focus on the criteria above]"
-            )
+            eligibility_text = eligibility_text[:6000] + "\n\n[Eligibility text truncated]"
 
-        # Append CIViC biomarker context to eligibility text if available
-        if biomarker_context:
-            eligibility_text = eligibility_text + "\n\n" + biomarker_context
+        # Step 1: Parse criteria into structured list (rule-based, no API call)
+        parse_result = parse_eligibility_criteria(eligibility_text)
+        if not parse_result.success or parse_result.data["total_criteria"] == 0:
+            logger.warning("analysis.no_criteria_parsed", nct_id=nct_id)
+            return None
 
+        parsed = parse_result.data
+        # Format parsed criteria for the prompt
+        criteria_lines = []
+        for c in parsed["inclusion_criteria"]:
+            criteria_lines.append(f"[{c['id']}] INCLUSION ({c['category']}): {c['text']}")
+        for c in parsed["exclusion_criteria"]:
+            criteria_lines.append(f"[{c['id']}] EXCLUSION ({c['category']}): {c['text']}")
+        parsed_criteria_text = "\n".join(criteria_lines)
+
+        # Step 2: Evaluate each criterion with Claude
         patient_vars = format_patient_for_prompt(patient)
+        enriched = ""
+        if biomarker_context:
+            enriched = f"## Enriched Biomarker Context\n{biomarker_context}"
+
         prompt_result = render_prompt(
             prompt_name="eligibility_analysis",
             **patient_vars,
@@ -501,7 +520,8 @@ class MatchingAgent(BaseAgent):
             brief_title=trial["brief_title"],
             phase=trial["phase"],
             brief_summary=trial["brief_summary"],
-            eligibility_criteria=eligibility_text,
+            parsed_criteria=parsed_criteria_text,
+            enriched_context=enriched,
         )
         if not prompt_result.success:
             return None
@@ -511,19 +531,76 @@ class MatchingAgent(BaseAgent):
                 response = await paced_claude_call(
                     get_claude_client(),
                     model=settings.claude_model,
-                    max_tokens=1500,
+                    max_tokens=2500,
                     messages=[{"role": "user", "content": prompt_result.data}],
                 )
                 text = response.content[0].text.strip()
                 result = parse_json_response(text)
-                if result is not None:
-                    if "match_score" not in result:
-                        result["match_score"] = 0
-                    return result
-                if attempt < settings.max_retries:
-                    continue
-                return extract_minimal_result(text, nct_id)
-            except Exception:
+                if result is None:
+                    if attempt < settings.max_retries:
+                        continue
+                    return None
+
+                # Step 3: Score programmatically from criterion evaluations
+                evals = result.get("criterion_evaluations", [])
+                if not evals:
+                    if attempt < settings.max_retries:
+                        continue
+                    return None
+
+                # Merge category from parsed criteria into evaluations
+                parsed_by_id = {}
+                for c in parsed["inclusion_criteria"] + parsed["exclusion_criteria"]:
+                    parsed_by_id[c["id"]] = c
+                for ev in evals:
+                    cid = ev.get("criterion_id", "")
+                    if cid in parsed_by_id:
+                        ev["category"] = parsed_by_id[cid].get("category", "other")
+
+                flags = result.get("flags_for_oncologist", [])
+                score_result = calculate_match_score(evals, flags)
+
+                # Build the analysis dict in the shape downstream expects
+                inclusion_evals = [e for e in evals if e.get("type") == "inclusion"]
+                exclusion_evals = [e for e in evals if e.get("type") == "exclusion"]
+
+                return {
+                    "match_score": score_result["score"],
+                    "match_tier": score_result["tier"],
+                    "match_explanation": score_result["match_explanation"],
+                    "inclusion_evaluations": [
+                        {
+                            "criterion": e.get("criterion_text", ""),
+                            "criterion_id": e.get("criterion_id", ""),
+                            "type": "inclusion",
+                            "status": e.get("status", "INSUFFICIENT_INFO"),
+                            "confidence": e.get("confidence", "MEDIUM"),
+                            "explanation": e.get("reasoning", ""),
+                            "patient_data_used": e.get("patient_data_used", []),
+                        }
+                        for e in inclusion_evals
+                    ],
+                    "exclusion_evaluations": [
+                        {
+                            "criterion": e.get("criterion_text", ""),
+                            "criterion_id": e.get("criterion_id", ""),
+                            "type": "exclusion",
+                            "status": e.get("status", "INSUFFICIENT_INFO"),
+                            "confidence": e.get("confidence", "MEDIUM"),
+                            "explanation": e.get("reasoning", ""),
+                            "patient_data_used": e.get("patient_data_used", []),
+                        }
+                        for e in exclusion_evals
+                    ],
+                    "flags_for_oncologist": flags,
+                    "criteria_met": score_result["criteria_met"],
+                    "criteria_not_met": score_result["criteria_not_met"],
+                    "criteria_unknown": score_result["criteria_unknown"],
+                    "criteria_total": score_result["criteria_total"],
+                }
+
+            except Exception as e:
+                logger.warning("analysis.error", nct_id=nct_id, attempt=attempt, error=str(e))
                 if attempt < settings.max_retries:
                     continue
                 return None

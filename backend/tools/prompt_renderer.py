@@ -32,7 +32,8 @@ PROMPT_SCHEMAS: dict[str, dict] = {
             "brief_title",
             "phase",
             "brief_summary",
-            "eligibility_criteria",
+            "parsed_criteria",
+            "enriched_context",
         ],
     },
     "patient_summary": {

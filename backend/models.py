@@ -21,8 +21,12 @@ class PatientProfile(BaseModel):
 
 class CriterionEvaluation(BaseModel):
     criterion: str
-    status: str  # "met", "not_met", "unknown"
+    criterion_id: str = ""
+    type: str = ""  # "inclusion" or "exclusion"
+    status: str  # "MET", "NOT_MET", "INSUFFICIENT_INFO" (inclusion) / "TRIGGERED", "NOT_TRIGGERED", "INSUFFICIENT_INFO" (exclusion)
+    confidence: str = "MEDIUM"  # "HIGH", "MEDIUM", "LOW"
     explanation: str
+    patient_data_used: list[str] = Field(default_factory=list)
 
 
 class TrialMatch(BaseModel):
@@ -33,11 +37,16 @@ class TrialMatch(BaseModel):
     conditions: list[str]
     brief_summary: str
     eligibility_criteria: str
-    match_score: int = Field(ge=0, le=100)
+    match_score: float = Field(ge=0, le=100)
+    match_tier: str = "UNKNOWN"  # STRONG_MATCH, POTENTIAL_MATCH, PARTIAL_MATCH, UNLIKELY_MATCH, EXCLUDED
     match_explanation: str
     inclusion_evaluations: list[CriterionEvaluation]
     exclusion_evaluations: list[CriterionEvaluation]
     flags_for_oncologist: list[str]
+    criteria_met: int = 0
+    criteria_not_met: int = 0
+    criteria_unknown: int = 0
+    criteria_total: int = 0
     nearest_site: dict | None = None
     distance_miles: float | None = None
     interventions: list[str] = Field(default_factory=list)

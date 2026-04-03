@@ -224,14 +224,14 @@ class TestPromptFormatting:
             brief_title=sample_trial["brief_title"],
             phase=sample_trial["phase"],
             brief_summary=sample_trial["brief_summary"],
-            eligibility_criteria=sample_trial["eligibility_criteria"],
+            parsed_criteria="[inc_1] INCLUSION (diagnosis): Stage IV NSCLC",
+            enriched_context="",
         )
-        # Verify key content is present
         assert "EGFR+" in prompt
         assert "Non-Small Cell Lung Cancer" in prompt
         assert "NCT12345678" in prompt
         assert "Stage IV" in prompt
-        assert "Carboplatin/Pemetrexed" in prompt
+        assert "inc_1" in prompt
 
     def test_eligibility_prompt_handles_empty_fields(self):
         """Ensure prompt works with minimal/empty patient data."""
@@ -251,7 +251,8 @@ class TestPromptFormatting:
             brief_title="Test Trial",
             phase="Phase 1",
             brief_summary="A test trial.",
-            eligibility_criteria="Inclusion: Age >= 18",
+            parsed_criteria="[inc_1] INCLUSION (demographic): Age >= 18",
+            enriched_context="",
         )
         assert "None reported" in prompt
         assert "Lung Cancer" in prompt
@@ -271,16 +272,16 @@ class TestPromptFormatting:
         assert "Pembrolizumab" in prompt
         assert "62" in prompt
 
-    def test_prompt_contains_few_shot_examples(self):
-        """Verify the prompt includes few-shot examples for the model."""
-        assert '"match_score": 88' in ELIGIBILITY_ANALYSIS_PROMPT
-        assert '"match_score": 12' in ELIGIBILITY_ANALYSIS_PROMPT
+    def test_prompt_contains_classification_guidelines(self):
+        """Verify the prompt includes MET/NOT_MET/INSUFFICIENT_INFO guidelines."""
+        assert "MET" in ELIGIBILITY_ANALYSIS_PROMPT
+        assert "NOT_MET" in ELIGIBILITY_ANALYSIS_PROMPT
+        assert "INSUFFICIENT_INFO" in ELIGIBILITY_ANALYSIS_PROMPT
+        assert "TRIGGERED" in ELIGIBILITY_ANALYSIS_PROMPT
 
-    def test_prompt_contains_edge_case_instructions(self):
-        assert "Biomarker-specific trials" in ELIGIBILITY_ANALYSIS_PROMPT
-        assert "Pediatric trials" in ELIGIBILITY_ANALYSIS_PROMPT
-        assert "Prior therapy requirements" in ELIGIBILITY_ANALYSIS_PROMPT
-        assert "Very long eligibility text" in ELIGIBILITY_ANALYSIS_PROMPT
+    def test_prompt_contains_important_rules(self):
+        assert "Do NOT default to NOT_MET" in ELIGIBILITY_ANALYSIS_PROMPT
+        assert "Missing data" in ELIGIBILITY_ANALYSIS_PROMPT
 
 
 # ---------------------------------------------------------------------------
@@ -420,12 +421,56 @@ class TestMatchResponse:
 
 
 class TestAnalyzeTrial:
+    def _criterion_eval_response(self):
+        """Build a valid criterion-level evaluation response."""
+        return {
+            "criterion_evaluations": [
+                {
+                    "criterion_id": "inc_1",
+                    "criterion_text": "Stage IV NSCLC",
+                    "type": "inclusion",
+                    "status": "MET",
+                    "confidence": "HIGH",
+                    "reasoning": "Patient has Stage IV NSCLC",
+                    "patient_data_used": ["cancer_type", "cancer_stage"],
+                },
+                {
+                    "criterion_id": "inc_2",
+                    "criterion_text": "EGFR activating mutation",
+                    "type": "inclusion",
+                    "status": "MET",
+                    "confidence": "HIGH",
+                    "reasoning": "Patient biomarkers include EGFR+",
+                    "patient_data_used": ["biomarkers"],
+                },
+                {
+                    "criterion_id": "inc_3",
+                    "criterion_text": "Age >= 18",
+                    "type": "inclusion",
+                    "status": "MET",
+                    "confidence": "HIGH",
+                    "reasoning": "Patient is 62 years old",
+                    "patient_data_used": ["age"],
+                },
+                {
+                    "criterion_id": "exc_4",
+                    "criterion_text": "Active brain metastases",
+                    "type": "exclusion",
+                    "status": "NOT_TRIGGERED",
+                    "confidence": "MEDIUM",
+                    "reasoning": "No brain mets reported",
+                    "patient_data_used": [],
+                },
+            ],
+            "flags_for_oncologist": ["Confirm no brain metastases"],
+        }
+
     @pytest.mark.asyncio
-    async def test_analyze_trial_success(self, sample_patient, sample_trial, valid_analysis_json):
+    async def test_analyze_trial_success(self, sample_patient, sample_trial):
         from matching_engine import _analyze_trial
 
         mock_response = MagicMock()
-        mock_response.content = [MagicMock(text=json.dumps(valid_analysis_json))]
+        mock_response.content = [MagicMock(text=json.dumps(self._criterion_eval_response()))]
 
         mock_client = AsyncMock()
         mock_client.messages.create = AsyncMock(return_value=mock_response)
@@ -434,10 +479,13 @@ class TestAnalyzeTrial:
             result = await _analyze_trial(sample_patient, sample_trial)
 
         assert result is not None
-        assert result["match_score"] == 85
+        # Programmatic scoring: 3 MET inclusions, no NOT_MET, no exclusion triggered
+        assert result["match_score"] > 80
+        assert result["match_tier"] == "STRONG_MATCH"
+        assert result["criteria_met"] == 3
 
     @pytest.mark.asyncio
-    async def test_analyze_trial_retries_on_bad_json(self, sample_patient, sample_trial, valid_analysis_json):
+    async def test_analyze_trial_retries_on_bad_json(self, sample_patient, sample_trial):
         """First call returns garbage, second call returns valid JSON."""
         from matching_engine import _analyze_trial
 
@@ -445,7 +493,7 @@ class TestAnalyzeTrial:
         bad_response.content = [MagicMock(text="not json at all")]
 
         good_response = MagicMock()
-        good_response.content = [MagicMock(text=json.dumps(valid_analysis_json))]
+        good_response.content = [MagicMock(text=json.dumps(self._criterion_eval_response()))]
 
         mock_client = AsyncMock()
         mock_client.messages.create = AsyncMock(side_effect=[bad_response, good_response])
@@ -454,26 +502,8 @@ class TestAnalyzeTrial:
             result = await _analyze_trial(sample_patient, sample_trial)
 
         assert result is not None
-        assert result["match_score"] == 85
+        assert result["match_score"] > 0
         assert mock_client.messages.create.call_count == 2
-
-    @pytest.mark.asyncio
-    async def test_analyze_trial_handles_truncated_json(self, sample_patient, sample_trial):
-        """Truncated JSON should be repaired."""
-        from matching_engine import _analyze_trial
-
-        truncated = '{"match_score": 60, "match_explanation": "Possible match", "inclusion_evaluations": [], "exclusion_evaluations": ['
-        mock_response = MagicMock()
-        mock_response.content = [MagicMock(text=truncated)]
-
-        mock_client = AsyncMock()
-        mock_client.messages.create = AsyncMock(return_value=mock_response)
-
-        with patch("matching_engine._get_client", return_value=mock_client):
-            result = await _analyze_trial(sample_patient, sample_trial)
-
-        assert result is not None
-        assert result["match_score"] == 60
 
     @pytest.mark.asyncio
     async def test_analyze_trial_handles_api_error(self, sample_patient, sample_trial):
@@ -490,28 +520,22 @@ class TestAnalyzeTrial:
 
     @pytest.mark.asyncio
     async def test_analyze_trial_truncates_long_eligibility(self, sample_patient, sample_trial):
-        """Very long eligibility text should be truncated."""
+        """Very long eligibility text should be truncated before parsing."""
         from matching_engine import _analyze_trial
 
-        sample_trial["eligibility_criteria"] = "x " * 5000  # 10000 chars
+        sample_trial["eligibility_criteria"] = "Inclusion Criteria:\n- Age >= 18\n" + "- Some criterion\n" * 500
 
         mock_response = MagicMock()
-        mock_response.content = [
-            MagicMock(
-                text='{"match_score": 50, "match_explanation": "OK", "inclusion_evaluations": [], "exclusion_evaluations": [], "flags_for_oncologist": []}'
-            )
-        ]
+        mock_response.content = [MagicMock(text=json.dumps(self._criterion_eval_response()))]
 
         mock_client = AsyncMock()
         mock_client.messages.create = AsyncMock(return_value=mock_response)
 
         with patch("matching_engine._get_client", return_value=mock_client):
-            await _analyze_trial(sample_patient, sample_trial)
+            result = await _analyze_trial(sample_patient, sample_trial)
 
-        # Check the prompt was called and eligibility was truncated
-        call_args = mock_client.messages.create.call_args
-        prompt_text = call_args.kwargs["messages"][0]["content"]
-        assert "[Eligibility text truncated" in prompt_text
+        # Should still produce a result even with long text
+        assert result is not None
 
 
 class TestGeneratePatientSummary:
@@ -544,6 +568,183 @@ class TestGeneratePatientSummary:
         assert "62" in result
         assert "Non-Small Cell Lung Cancer" in result
         assert "Carboplatin/Pemetrexed" in result
+
+
+# ---------------------------------------------------------------------------
+# Adaptive concurrency limiter tests
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Criteria parser tests
+# ---------------------------------------------------------------------------
+
+
+class TestCriteriaParser:
+    def test_parse_basic_eligibility(self):
+        from tools.criteria_parser import parse_eligibility_criteria
+
+        text = """
+Inclusion Criteria:
+- Histologically confirmed NSCLC
+- Age >= 18 years
+- ECOG performance status 0-1
+
+Exclusion Criteria:
+- Active brain metastases
+- Prior treatment with osimertinib
+"""
+        result = parse_eligibility_criteria(text)
+        assert result.success
+        assert len(result.data["inclusion_criteria"]) == 3
+        assert len(result.data["exclusion_criteria"]) == 2
+        assert result.data["inclusion_criteria"][0]["category"] == "diagnosis"
+        assert result.data["exclusion_criteria"][0]["category"] == "disease_status"
+
+    def test_parse_numbered_list(self):
+        from tools.criteria_parser import parse_eligibility_criteria
+
+        text = """
+Inclusion Criteria:
+1. Age 18 or older
+2. EGFR mutation confirmed
+3. At least one prior line of therapy
+
+Exclusion Criteria:
+1. Pregnant or breastfeeding
+2. Active autoimmune disease
+"""
+        result = parse_eligibility_criteria(text)
+        assert result.success
+        assert len(result.data["inclusion_criteria"]) == 3
+        assert len(result.data["exclusion_criteria"]) == 2
+
+    def test_parse_no_headers(self):
+        from tools.criteria_parser import parse_eligibility_criteria
+
+        text = (
+            """- Age greater than or equal to 18 years\n- ECOG performance status 0 or 1\n- Adequate organ function"""
+        )
+        result = parse_eligibility_criteria(text)
+        assert result.success
+        # All treated as inclusion when no exclusion header
+        assert len(result.data["inclusion_criteria"]) == 3
+        assert len(result.data["exclusion_criteria"]) == 0
+
+    def test_parse_empty_text(self):
+        from tools.criteria_parser import parse_eligibility_criteria
+
+        result = parse_eligibility_criteria("")
+        assert not result.success
+
+    def test_classification_categories(self):
+        from tools.criteria_parser import _classify_criterion
+
+        assert _classify_criterion("EGFR mutation positive") == "biomarker"
+        assert _classify_criterion("Age >= 18 years") == "demographic"
+        assert _classify_criterion("ECOG performance status 0-1") == "performance"
+        assert _classify_criterion("Adequate hepatic function") == "labs"
+        assert _classify_criterion("Prior chemotherapy required") == "prior_therapy"
+        assert _classify_criterion("Active brain metastases") == "disease_status"
+
+
+# ---------------------------------------------------------------------------
+# Programmatic scoring tests
+# ---------------------------------------------------------------------------
+
+
+class TestProgrammaticScoring:
+    def test_strong_match(self):
+        from tools.scoring import calculate_match_score
+
+        evals = [
+            {"type": "inclusion", "status": "MET", "confidence": "HIGH"},
+            {"type": "inclusion", "status": "MET", "confidence": "HIGH"},
+            {"type": "inclusion", "status": "MET", "confidence": "HIGH"},
+            {"type": "exclusion", "status": "NOT_TRIGGERED", "confidence": "HIGH"},
+        ]
+        result = calculate_match_score(evals)
+        assert result["score"] >= 75
+        assert result["tier"] == "STRONG_MATCH"
+        assert result["criteria_met"] == 3
+
+    def test_exclusion_triggered_scores_zero(self):
+        from tools.scoring import calculate_match_score
+
+        evals = [
+            {"type": "inclusion", "status": "MET", "confidence": "HIGH"},
+            {"type": "exclusion", "status": "TRIGGERED", "confidence": "HIGH", "criterion_text": "Prior immunotherapy"},
+        ]
+        result = calculate_match_score(evals)
+        assert result["score"] == 0
+        assert result["tier"] == "EXCLUDED"
+
+    def test_mixed_results(self):
+        from tools.scoring import calculate_match_score
+
+        evals = [
+            {"type": "inclusion", "status": "MET", "confidence": "HIGH"},
+            {"type": "inclusion", "status": "MET", "confidence": "MEDIUM"},
+            {"type": "inclusion", "status": "INSUFFICIENT_INFO", "confidence": "LOW"},
+            {"type": "inclusion", "status": "NOT_MET", "confidence": "HIGH"},
+            {"type": "exclusion", "status": "NOT_TRIGGERED", "confidence": "MEDIUM"},
+        ]
+        result = calculate_match_score(evals)
+        assert 20 < result["score"] < 70
+        assert result["criteria_met"] == 2
+        assert result["criteria_not_met"] == 1
+        assert result["criteria_unknown"] == 1
+
+    def test_all_unknown(self):
+        from tools.scoring import calculate_match_score
+
+        evals = [
+            {"type": "inclusion", "status": "INSUFFICIENT_INFO", "confidence": "LOW"},
+            {"type": "inclusion", "status": "INSUFFICIENT_INFO", "confidence": "LOW"},
+            {"type": "inclusion", "status": "INSUFFICIENT_INFO", "confidence": "LOW"},
+        ]
+        result = calculate_match_score(evals)
+        # 0.3 weight per unknown = 30 base
+        assert result["score"] < 40
+        assert result["tier"] in ("PARTIAL_MATCH", "UNLIKELY_MATCH")
+
+    def test_score_differentiation(self):
+        """Different criterion mixes should produce different scores."""
+        from tools.scoring import calculate_match_score
+
+        # All MET
+        all_met = [{"type": "inclusion", "status": "MET", "confidence": "HIGH"} for _ in range(5)]
+        # Half MET, half unknown
+        half = [{"type": "inclusion", "status": "MET", "confidence": "HIGH"} for _ in range(3)] + [
+            {"type": "inclusion", "status": "INSUFFICIENT_INFO", "confidence": "LOW"} for _ in range(3)
+        ]
+        # Mostly NOT_MET
+        bad = [{"type": "inclusion", "status": "NOT_MET", "confidence": "HIGH"} for _ in range(3)] + [
+            {"type": "inclusion", "status": "MET", "confidence": "HIGH"}
+        ]
+
+        s1 = calculate_match_score(all_met)["score"]
+        s2 = calculate_match_score(half)["score"]
+        s3 = calculate_match_score(bad)["score"]
+
+        assert s1 > s2 > s3, f"Expected {s1} > {s2} > {s3}"
+
+    def test_critical_not_met_low_score(self):
+        from tools.scoring import calculate_match_score
+
+        evals = [
+            {
+                "type": "inclusion",
+                "status": "NOT_MET",
+                "confidence": "HIGH",
+                "category": "biomarker",
+                "criterion_text": "EGFR mutation required",
+            },
+            {"type": "inclusion", "status": "MET", "confidence": "HIGH"},
+        ]
+        result = calculate_match_score(evals)
+        assert result["score"] <= 10
+        assert result["tier"] == "EXCLUDED"
 
 
 # ---------------------------------------------------------------------------

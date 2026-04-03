@@ -24,6 +24,18 @@ def build_scored_match(trial: dict, analysis: dict, patient: PatientProfile) -> 
     if distance is not None and distance > patient.willing_to_travel_miles:
         return None
 
+    def _safe_criterion(e: dict) -> dict:
+        """Ensure criterion eval dict has all required fields."""
+        return {
+            "criterion": e.get("criterion", ""),
+            "criterion_id": e.get("criterion_id", ""),
+            "type": e.get("type", ""),
+            "status": e.get("status", "INSUFFICIENT_INFO"),
+            "confidence": e.get("confidence", "MEDIUM"),
+            "explanation": e.get("explanation", ""),
+            "patient_data_used": e.get("patient_data_used", []),
+        }
+
     return TrialMatch(
         nct_id=trial["nct_id"],
         brief_title=trial["brief_title"],
@@ -33,10 +45,19 @@ def build_scored_match(trial: dict, analysis: dict, patient: PatientProfile) -> 
         brief_summary=trial["brief_summary"],
         eligibility_criteria=trial["eligibility_criteria"],
         match_score=analysis.get("match_score", 0),
+        match_tier=analysis.get("match_tier", "UNKNOWN"),
         match_explanation=analysis.get("match_explanation", ""),
-        inclusion_evaluations=[CriterionEvaluation(**e) for e in analysis.get("inclusion_evaluations", [])],
-        exclusion_evaluations=[CriterionEvaluation(**e) for e in analysis.get("exclusion_evaluations", [])],
+        inclusion_evaluations=[
+            CriterionEvaluation(**_safe_criterion(e)) for e in analysis.get("inclusion_evaluations", [])
+        ],
+        exclusion_evaluations=[
+            CriterionEvaluation(**_safe_criterion(e)) for e in analysis.get("exclusion_evaluations", [])
+        ],
         flags_for_oncologist=analysis.get("flags_for_oncologist", []),
+        criteria_met=analysis.get("criteria_met", 0),
+        criteria_not_met=analysis.get("criteria_not_met", 0),
+        criteria_unknown=analysis.get("criteria_unknown", 0),
+        criteria_total=analysis.get("criteria_total", 0),
         nearest_site=nearest_site,
         distance_miles=distance,
         interventions=trial.get("interventions", []),

@@ -193,7 +193,7 @@ Think step by step, then call the appropriate tool.
 """
 
 ELIGIBILITY_ANALYSIS_PROMPT = """\
-You are an expert oncology clinical trial eligibility analyst. Carefully evaluate whether this cancer patient is likely eligible for the specified clinical trial.
+You are an expert oncology clinical trial eligibility analyst. Evaluate this patient against EACH criterion individually.
 
 ## Patient Profile
 - **Cancer Type:** {cancer_type}
@@ -207,42 +207,51 @@ You are an expert oncology clinical trial eligibility analyst. Carefully evaluat
 - **Other Conditions:** {additional_conditions}
 - **Additional Notes:** {additional_notes}
 
+{enriched_context}
+
 ## Clinical Trial: {nct_id} — {brief_title}
 **Phase:** {phase}
 **Summary:** {brief_summary}
 
-### Eligibility Criteria
-{eligibility_criteria}
+## Parsed Criteria to Evaluate
+{parsed_criteria}
 
-## Instructions
+## Classification Guidelines
 
-Evaluate the patient against each eligibility criterion. Be concise — use short phrases, not full sentences, in per-criterion explanations.
+For each INCLUSION criterion, classify as:
+- **MET** — Patient profile contains explicit information satisfying this criterion.
+  Example: Criterion "Age >= 18" + Patient age 54 → MET (HIGH confidence)
+  Example: Criterion "EGFR mutation positive" + Patient biomarkers include "EGFR+" → MET (HIGH confidence)
+- **NOT_MET** — Patient profile contains explicit information contradicting this criterion.
+  Example: Criterion "No prior immunotherapy" + Patient prior_treatments includes "Pembrolizumab" → NOT_MET (HIGH confidence)
+  Example: Criterion "ECOG 0-1" + Patient ECOG score 3 → NOT_MET (HIGH confidence)
+- **INSUFFICIENT_INFO** — Patient profile lacks the data needed to evaluate.
+  Example: Criterion "Adequate hepatic function (AST/ALT < 2.5x ULN)" + No lab data → INSUFFICIENT_INFO (LOW confidence)
+  Example: Criterion "No history of autoimmune disease" + No comorbidities listed → INSUFFICIENT_INFO (LOW confidence)
 
-### Scoring Rubric
-Assign a match confidence score (0-100) based on these rules:
-- **85-100 (Strong match):** Patient clearly meets ALL key inclusion criteria AND triggers NO exclusion criteria. At most minor unknowns (e.g., a lab value not reported but typically normal).
-- **65-84 (Likely match):** Patient meets the major criteria (cancer type, stage, biomarkers if required). A few unknowns exist but nothing suggests disqualification.
-- **40-64 (Possible match):** Significant unknowns OR one borderline criterion. Could go either way — worth discussing with oncologist.
-- **20-39 (Unlikely match):** Patient likely fails at least one important criterion OR has a condition that commonly triggers exclusion.
-- **0-19 (Poor match):** Patient clearly fails a hard inclusion criterion (wrong cancer type, wrong stage, required biomarker absent) OR clearly triggers a hard exclusion.
+For each EXCLUSION criterion, classify as:
+- **NOT_TRIGGERED** — Patient does NOT have the excluding condition.
+  Example: Criterion "Active brain metastases" + No brain mets mentioned, cancer is early stage → NOT_TRIGGERED (MEDIUM confidence)
+- **TRIGGERED** — Patient explicitly HAS the excluding condition.
+  Example: Criterion "Prior treatment with osimertinib" + Patient took osimertinib → TRIGGERED (HIGH confidence)
+- **INSUFFICIENT_INFO** — Cannot determine if exclusion applies.
+  Example: Criterion "Active hepatitis B/C" + No mention in patient profile → INSUFFICIENT_INFO (LOW confidence)
 
-### Special Cases
-- **Biomarker-specific trials:** If the trial requires a specific biomarker (e.g., EGFR mutation, HER2+, BRCA1/2) and the patient lacks it or is negative, score 0-19. If biomarker status is unknown/not tested, score 30-50 and flag for oncologist.
-- **Pediatric trials:** If the trial specifies a maximum age below 18 and the patient is an adult (or vice versa), score 0.
-- **Prior therapy requirements:** Some trials require specific prior treatments (e.g., "must have progressed on platinum-based chemo"). Evaluate carefully against the patient's treatment history.
-- **Very long eligibility text:** Focus on the criteria most likely to disqualify: cancer type/stage match, required biomarkers, prior therapy, ECOG, key organ function labs. Summarize the rest briefly.
+IMPORTANT RULES:
+- Do NOT default to NOT_MET when information is missing. Missing data = INSUFFICIENT_INFO.
+- Do NOT conflate "patient didn't mention it" with "patient doesn't have it."
+- For exclusion criteria about rare conditions (e.g., interstitial lung disease), if the patient has no relevant history mentioned, use NOT_TRIGGERED with LOW confidence.
+- For exclusion criteria about common conditions (e.g., active infection), if no info available, use INSUFFICIENT_INFO.
 
-### Output Format
-Respond with ONLY a JSON object — no markdown fences, no commentary. Keep the total response under 1000 tokens. Limit inclusion_evaluations and exclusion_evaluations to the 5-8 most important criteria each rather than listing every single one.
+## Confidence Levels
+- **HIGH** — The patient data directly and unambiguously addresses this criterion.
+- **MEDIUM** — The data partially addresses this, or requires a reasonable inference.
+- **LOW** — The evaluation is based on absence of information or uncertain inference.
 
-Example of a STRONG match:
-{{"match_score": 88, "match_explanation": "You appear to be a strong fit for this trial. It's studying a new immunotherapy for Stage IV NSCLC patients who have already tried platinum-based chemotherapy, which matches your situation. Your PD-L1 status and ECOG score also align with what they're looking for.", "inclusion_evaluations": [{{"criterion": "Stage IV NSCLC", "status": "met", "explanation": "Patient has Stage IV NSCLC"}}, {{"criterion": "Prior platinum-based therapy", "status": "met", "explanation": "Had Carboplatin/Pemetrexed"}}, {{"criterion": "ECOG 0-1", "status": "met", "explanation": "ECOG is 1"}}], "exclusion_evaluations": [{{"criterion": "Active brain metastases", "status": "not_triggered", "explanation": "No brain mets reported"}}, {{"criterion": "Autoimmune disease", "status": "not_triggered", "explanation": "No autoimmune conditions listed"}}], "flags_for_oncologist": ["Confirm no untreated brain metastases", "Verify adequate organ function labs"]}}
+## Output Format
+Respond with ONLY a JSON object. Evaluate EVERY criterion listed above — do not skip any.
 
-Example of a POOR match:
-{{"match_score": 12, "match_explanation": "This trial is specifically for patients with EGFR-mutated lung cancer. Your biomarker results show EGFR-negative, which unfortunately means this trial would not be a fit.", "inclusion_evaluations": [{{"criterion": "EGFR activating mutation", "status": "not_met", "explanation": "Patient is EGFR-negative"}}], "exclusion_evaluations": [], "flags_for_oncologist": []}}
-
-JSON schema:
-{{"match_score": <int 0-100>, "match_explanation": "<2-3 sentences a patient can understand>", "inclusion_evaluations": [{{"criterion": "<text>", "status": "met|not_met|unknown", "explanation": "<short phrase>"}}], "exclusion_evaluations": [{{"criterion": "<text>", "status": "not_triggered|triggered|unknown", "explanation": "<short phrase>"}}], "flags_for_oncologist": ["<item>"]}}
+{{"criterion_evaluations": [{{"criterion_id": "<id from parsed criteria>", "criterion_text": "<the criterion>", "type": "inclusion|exclusion", "status": "MET|NOT_MET|INSUFFICIENT_INFO|TRIGGERED|NOT_TRIGGERED", "confidence": "HIGH|MEDIUM|LOW", "reasoning": "<1-2 sentences citing specific patient data>", "patient_data_used": ["<field names from patient profile>"]}}], "flags_for_oncologist": ["<items that need physician verification>"]}}
 """
 
 PATIENT_SUMMARY_PROMPT = """\
