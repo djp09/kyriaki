@@ -191,7 +191,45 @@ class TrialWatchDB(Base):
     last_checked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
-    __table_args__ = (Index("ix_watch_patient_id", "patient_id"),)
+    __table_args__ = (
+        Index("ix_watch_patient_id", "patient_id"),
+        Index("ix_watch_patient_nct", "patient_id", "nct_id", unique=True),
+    )
+
+
+# --- Pipeline state ---
+
+PIPELINE_STAGES = ("matching", "dossier", "enrollment", "outreach", "monitoring")
+
+
+class PatientPipelineDB(Base):
+    """Tracks the current stage of a patient's journey through the agent pipeline.
+
+    One row per patient. Updated as agents complete/block/fail.
+    """
+
+    __tablename__ = "patient_pipelines"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    patient_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("patient_profiles.id"), nullable=False, unique=True
+    )
+    current_stage: Mapped[str] = mapped_column(String(32), nullable=False, default="matching")
+    current_task_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("agent_tasks.id"), nullable=True
+    )
+    blocked_at_gate_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("human_gates.id"), nullable=True
+    )
+    last_completed_stage: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    last_completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+
+    __table_args__ = (
+        Index("ix_pipeline_patient_id", "patient_id", unique=True),
+        Index("ix_pipeline_stage", "current_stage"),
+    )
 
 
 # --- Ground truth feedback ---

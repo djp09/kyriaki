@@ -7,12 +7,22 @@ import uuid
 from unittest.mock import AsyncMock, patch
 
 import pytest
+import pytest_asyncio
 
 from agent_loop import FINISH_TOOL, Scratchpad, ToolDefinition, _build_tool_use_tools
 from agents import MATCHING_TOOLS, AgentContext, DossierAgent, MatchingAgent
 from tools import TokenUsage
-from db_models import AgentEventDB, AgentTaskDB, GateStatus, HumanGateDB, TaskStatus
-from dispatcher import dispatch, dispatch_background, recover_stale_tasks
+from db_models import AgentEventDB, AgentTaskDB, GateStatus, HumanGateDB, PatientPipelineDB, TaskStatus, TrialWatchDB
+from dispatcher import (
+    dispatch,
+    dispatch_background,
+    get_or_create_pipeline,
+    get_trial_watches,
+    has_active_task,
+    recover_stale_tasks,
+    retry_task,
+    upsert_trial_watches,
+)
 from models import (
     ActivityItem,
     DossierRequest,
@@ -120,6 +130,22 @@ def _build_matching_scratchpad(trials=None, analyses=None):
 # ---------------------------------------------------------------------------
 
 
+class _FakeResult:
+    """Fake SQLAlchemy result that returns empty for all queries."""
+
+    def scalars(self):
+        return self
+
+    def first(self):
+        return None
+
+    def all(self):
+        return []
+
+    def unique(self):
+        return self
+
+
 class FakeSession:
     def __init__(self):
         self.added = []
@@ -140,6 +166,9 @@ class FakeSession:
 
     async def get(self, model, pk):
         return None
+
+    async def execute(self, stmt):
+        return _FakeResult()
 
 
 # ---------------------------------------------------------------------------
@@ -604,7 +633,7 @@ _is_postgres = "postgresql" in os.environ.get("KYRIAKI_DATABASE_URL", "")
 
 @pytest.mark.skipif(_is_postgres, reason="Uses SQLite test DB")
 class TestStaleTaskRecovery:
-    @pytest.fixture
+    @pytest_asyncio.fixture
     async def db_session(self):
         from database import async_session, engine
         from db_models import Base
@@ -773,3 +802,270 @@ class TestTokenTracking:
         assert result.output_data["token_usage"]["input_tokens"] == 1300
         assert result.output_data["token_usage"]["output_tokens"] == 300
         assert result.output_data["token_usage"]["total_tokens"] == 1600
+
+
+# ---------------------------------------------------------------------------
+# Workflow state management tests (require real DB)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(_is_postgres, reason="Uses SQLite test DB")
+class TestDuplicateDispatchGuard:
+    @pytest_asyncio.fixture
+    async def db_session(self):
+        from database import async_session, engine
+        from db_models import Base
+
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        async with async_session() as session:
+            yield session
+
+    @pytest.mark.asyncio
+    async def test_has_active_task_returns_none_when_clean(self, db_session):
+        result = await has_active_task(db_session, "matching", uuid.uuid4())
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_has_active_task_finds_running(self, db_session):
+        pid = uuid.uuid4()
+        task = AgentTaskDB(agent_type="matching", status="running", patient_id=pid, input_data={})
+        db_session.add(task)
+        await db_session.flush()
+
+        result = await has_active_task(db_session, "matching", pid)
+        assert result is not None
+        assert result.id == task.id
+
+    @pytest.mark.asyncio
+    async def test_has_active_task_ignores_completed(self, db_session):
+        pid = uuid.uuid4()
+        task = AgentTaskDB(agent_type="matching", status="completed", patient_id=pid, input_data={})
+        db_session.add(task)
+        await db_session.flush()
+
+        result = await has_active_task(db_session, "matching", pid)
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_has_active_task_scoped_to_agent_type(self, db_session):
+        pid = uuid.uuid4()
+        task = AgentTaskDB(agent_type="dossier", status="running", patient_id=pid, input_data={})
+        db_session.add(task)
+        await db_session.flush()
+
+        # Different agent type should not be found
+        result = await has_active_task(db_session, "matching", pid)
+        assert result is None
+
+
+@pytest.mark.skipif(_is_postgres, reason="Uses SQLite test DB")
+class TestTrialWatches:
+    @pytest_asyncio.fixture
+    async def db_session(self):
+        from database import async_session, engine
+        from db_models import Base
+
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        async with async_session() as session:
+            yield session
+
+    @pytest.mark.asyncio
+    async def test_upsert_creates_watches(self, db_session):
+        pid = uuid.uuid4()
+        watches = [
+            {"nct_id": "NCT001", "last_status": "RECRUITING"},
+            {"nct_id": "NCT002", "last_status": "RECRUITING"},
+        ]
+        count = await upsert_trial_watches(db_session, pid, watches)
+        assert count == 2
+
+        result = await get_trial_watches(db_session, pid)
+        assert len(result) == 2
+        nct_ids = {w["nct_id"] for w in result}
+        assert nct_ids == {"NCT001", "NCT002"}
+
+    @pytest.mark.asyncio
+    async def test_upsert_updates_existing(self, db_session):
+        pid = uuid.uuid4()
+        await upsert_trial_watches(db_session, pid, [{"nct_id": "NCT001", "last_status": "RECRUITING"}])
+
+        # Update status
+        await upsert_trial_watches(db_session, pid, [{"nct_id": "NCT001", "last_status": "COMPLETED"}])
+
+        result = await get_trial_watches(db_session, pid)
+        assert len(result) == 1
+        assert result[0]["last_status"] == "COMPLETED"
+
+    @pytest.mark.asyncio
+    async def test_get_watches_empty(self, db_session):
+        result = await get_trial_watches(db_session, uuid.uuid4())
+        assert result == []
+
+
+@pytest.mark.skipif(_is_postgres, reason="Uses SQLite test DB")
+class TestPipelineState:
+    @pytest_asyncio.fixture
+    async def db_session(self):
+        from database import async_session, engine
+        from db_models import Base
+
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        async with async_session() as session:
+            yield session
+
+    @pytest.mark.asyncio
+    async def test_get_or_create_pipeline(self, db_session):
+        pid = uuid.uuid4()
+        pipeline = await get_or_create_pipeline(db_session, pid)
+        assert pipeline.current_stage == "matching"
+        assert pipeline.patient_id == pid
+
+        # Second call returns same record
+        pipeline2 = await get_or_create_pipeline(db_session, pid)
+        assert pipeline2.id == pipeline.id
+
+    @pytest.mark.asyncio
+    async def test_retry_task_creates_new(self, db_session):
+        pid = uuid.uuid4()
+        original = AgentTaskDB(
+            agent_type="matching",
+            status="failed",
+            patient_id=pid,
+            input_data={"patient": {"cancer_type": "NSCLC"}},
+            error="API down",
+        )
+        db_session.add(original)
+        await db_session.flush()
+
+        new_task = await retry_task(db_session, original.id)
+        assert new_task is not None
+        assert new_task.id != original.id
+        assert new_task.agent_type == "matching"
+        assert new_task.status == "pending"
+        assert new_task.input_data == original.input_data
+
+    @pytest.mark.asyncio
+    async def test_retry_non_failed_returns_none(self, db_session):
+        pid = uuid.uuid4()
+        task = AgentTaskDB(
+            agent_type="matching", status="completed", patient_id=pid, input_data={}, output_data={}
+        )
+        db_session.add(task)
+        await db_session.flush()
+
+        result = await retry_task(db_session, task.id)
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_retry_nonexistent_returns_none(self, db_session):
+        result = await retry_task(db_session, uuid.uuid4())
+        assert result is None
+
+
+@pytest.mark.skipif(_is_postgres, reason="Uses SQLite test DB")
+class TestPipelineEndpoints:
+    @pytest.fixture
+    def client(self):
+        from fastapi.testclient import TestClient
+
+        from main import app
+
+        with TestClient(app) as c:
+            yield c
+
+    def test_pipeline_status_new_patient(self, client):
+        resp = client.get(f"/api/patients/{uuid.uuid4()}/pipeline")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["current_stage"] == "matching"
+        assert data["current_task_id"] is None
+
+    def test_retry_not_found(self, client):
+        resp = client.post(f"/api/agents/tasks/{uuid.uuid4()}/retry")
+        assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# PDF generation tests
+# ---------------------------------------------------------------------------
+
+
+class TestPDFRenderer:
+    def test_render_basic_dossier(self):
+        from tools.pdf_renderer import render_dossier_pdf
+
+        dossier = {
+            "patient_summary": "A 62-year-old male with Stage IV NSCLC.",
+            "generated_at": "2026-04-02T00:00:00Z",
+            "sections": [
+                {
+                    "nct_id": "NCT12345678",
+                    "brief_title": "Study of Drug X in NSCLC",
+                    "revised_score": 85,
+                    "score_justification": "Strong match based on cancer type and biomarkers.",
+                    "clinical_summary": "Patient meets all major inclusion criteria.",
+                    "patient_summary": "This trial is a strong fit for you.",
+                    "criteria_analysis": [
+                        {"criterion": "Stage IV NSCLC", "type": "inclusion", "status": "met", "evidence": "Patient has Stage IV NSCLC"},
+                        {"criterion": "EGFR mutation", "type": "inclusion", "status": "met", "evidence": "EGFR+"},
+                        {"criterion": "Active brain mets", "type": "exclusion", "status": "not_triggered", "evidence": "None reported"},
+                    ],
+                    "next_steps": ["Contact trial site", "Get recent labs"],
+                    "flags": ["Verify no brain metastases"],
+                }
+            ],
+        }
+
+        patient_data = {
+            "cancer_type": "Non-Small Cell Lung Cancer",
+            "cancer_stage": "Stage IV",
+            "age": 62,
+            "sex": "male",
+            "biomarkers": ["EGFR+", "PD-L1 80%"],
+            "prior_treatments": ["Carboplatin/Pemetrexed"],
+            "lines_of_therapy": 1,
+            "ecog_score": 1,
+        }
+
+        result = render_dossier_pdf(dossier, patient_data)
+        assert result.success
+        assert isinstance(result.data, bytes)
+        assert len(result.data) > 1000  # A real PDF should be > 1KB
+        assert result.data[:5] == b"%PDF-"  # Valid PDF header
+
+    def test_render_empty_dossier(self):
+        from tools.pdf_renderer import render_dossier_pdf
+
+        dossier = {"patient_summary": "", "sections": []}
+        result = render_dossier_pdf(dossier)
+        assert result.success
+        assert result.data[:5] == b"%PDF-"
+
+    def test_render_multiple_sections(self):
+        from tools.pdf_renderer import render_dossier_pdf
+
+        dossier = {
+            "patient_summary": "Summary text.",
+            "sections": [
+                {"nct_id": "NCT001", "brief_title": "Trial A", "revised_score": 90, "criteria_analysis": []},
+                {"nct_id": "NCT002", "brief_title": "Trial B", "revised_score": 45, "criteria_analysis": []},
+                {"nct_id": "NCT003", "brief_title": "Trial C", "revised_score": 15, "criteria_analysis": []},
+            ],
+        }
+        result = render_dossier_pdf(dossier)
+        assert result.success
+
+    def test_render_with_analysis_error_section(self):
+        from tools.pdf_renderer import render_dossier_pdf
+
+        dossier = {
+            "patient_summary": "Summary.",
+            "sections": [
+                {"nct_id": "NCT001", "brief_title": "Trial A", "analysis_error": "Failed to parse"},
+            ],
+        }
+        result = render_dossier_pdf(dossier)
+        assert result.success

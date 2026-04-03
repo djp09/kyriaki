@@ -53,6 +53,9 @@ class Settings(BaseSettings):
     monitor_enabled: bool = False
     monitor_interval_seconds: int = 3600
 
+    # Pipeline auto-chaining
+    auto_chain_matching_to_dossier: bool = False  # If True, auto-dispatch dossier after matching completes
+
     # Trials client
     cache_ttl: int = 300
 

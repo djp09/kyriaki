@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 import agents as _agents  # noqa: F401 — triggers agent registration
 from config import get_settings
 from database import async_session, get_db
-from db_models import AgentEventDB, AgentTaskDB, HumanGateDB, TaskStatus
+from db_models import AgentEventDB, AgentTaskDB, HumanGateDB, PatientPipelineDB, TaskStatus, TrialWatchDB
 from db_service import (
     get_patient_activity,
     get_task_with_gates,
@@ -30,7 +30,15 @@ from db_service import (
     list_tasks_for_patient,
     save_patient_profile,
 )
-from dispatcher import dispatch_background, recover_stale_tasks
+from dispatcher import (
+    dispatch_background,
+    get_or_create_pipeline,
+    get_trial_watches,
+    has_active_task,
+    recover_stale_tasks,
+    retry_task,
+    upsert_trial_watches,
+)
 from logging_config import get_logger, setup_logging
 from matching_engine import match_trials
 from middleware import RequestLoggingMiddleware
@@ -53,6 +61,7 @@ from models import (
     TaskResponse,
 )
 from tools.ground_truth import compute_outcome_stats, get_outcomes_for_patient, upsert_outcome
+from tools.pdf_renderer import render_dossier_pdf
 from trials_client import close_http_client, get_trial
 
 settings = get_settings()
@@ -61,41 +70,21 @@ logger = get_logger("kyriaki.main")
 
 
 async def _monitor_loop() -> None:
-    """Background loop: periodically dispatches MonitorAgent for all tracked patients."""
+    """Background loop: periodically dispatches MonitorAgent for all tracked patients.
+
+    Uses TrialWatchDB for persistent watch state instead of rebuilding from matching output.
+    """
     while True:
         await asyncio.sleep(settings.monitor_interval_seconds)
         try:
             async with async_session() as session:
-                # Find all patients with completed matching tasks
-                stmt = (
-                    select(AgentTaskDB.patient_id)
-                    .where(AgentTaskDB.agent_type == "matching", AgentTaskDB.status == "completed")
-                    .distinct()
-                )
+                # Find all patients with trial watches
+                stmt = select(TrialWatchDB.patient_id).distinct()
                 result = await session.execute(stmt)
                 patient_ids = [row[0] for row in result.all()]
 
                 for pid in patient_ids:
-                    # Gather watched trials from completed matching tasks
-                    task_stmt = (
-                        select(AgentTaskDB)
-                        .where(
-                            AgentTaskDB.patient_id == pid,
-                            AgentTaskDB.agent_type == "matching",
-                            AgentTaskDB.status == "completed",
-                        )
-                        .order_by(AgentTaskDB.created_at.desc())
-                        .limit(1)
-                    )
-                    task_result = await session.execute(task_stmt)
-                    task = task_result.scalars().first()
-                    if not task or not task.output_data:
-                        continue
-
-                    watches = [
-                        {"nct_id": m["nct_id"], "last_status": m.get("overall_status", ""), "last_site_count": 0}
-                        for m in task.output_data.get("matches", [])
-                    ]
+                    watches = await get_trial_watches(session, pid)
                     if watches:
                         await dispatch_background(session, "monitor", pid, input_data={"watches": watches})
                 await session.commit()
@@ -449,26 +438,10 @@ async def agent_outreach(request: OutreachRequest, db: AsyncSession = Depends(ge
 async def agent_monitor(request: MonitorRequest, db: AsyncSession = Depends(get_db)):
     patient_id = _parse_uuid(request.patient_id)
 
-    # Build watch list from latest matching task
-    stmt = (
-        select(AgentTaskDB)
-        .where(
-            AgentTaskDB.patient_id == patient_id,
-            AgentTaskDB.agent_type == "matching",
-            AgentTaskDB.status == "completed",
-        )
-        .order_by(AgentTaskDB.created_at.desc())
-        .limit(1)
-    )
-    result = await db.execute(stmt)
-    match_task = result.scalars().first()
-    if not match_task or not match_task.output_data:
-        raise HTTPException(404, "No completed matching task found for this patient")
-
-    watches = [
-        {"nct_id": m["nct_id"], "last_status": m.get("overall_status", ""), "last_site_count": 0}
-        for m in match_task.output_data.get("matches", [])
-    ]
+    # Use persisted trial watches
+    watches = await get_trial_watches(db, patient_id)
+    if not watches:
+        raise HTTPException(404, "No trial watches found for this patient")
 
     task = await dispatch_background(db, "monitor", patient_id, input_data={"watches": watches})
     return _task_to_response(task)
@@ -480,6 +453,59 @@ async def monitor_status():
         "enabled": settings.monitor_enabled,
         "interval_seconds": settings.monitor_interval_seconds,
     }
+
+
+@app.post("/api/agents/tasks/{task_id}/retry", response_model=TaskResponse)
+async def retry_failed_task(task_id: str, db: AsyncSession = Depends(get_db)):
+    """Retry a failed task by re-dispatching with the same input."""
+    new_task = await retry_task(db, _parse_uuid(task_id))
+    if not new_task:
+        raise HTTPException(404, "Task not found or is not in failed state")
+    return _task_to_response(new_task)
+
+
+@app.get("/api/patients/{patient_id}/pipeline")
+async def patient_pipeline(patient_id: str, db: AsyncSession = Depends(get_db)):
+    """Get the current pipeline state for a patient."""
+    pid = _parse_uuid(patient_id)
+    pipeline = await get_or_create_pipeline(db, pid)
+    return {
+        "patient_id": patient_id,
+        "current_stage": pipeline.current_stage,
+        "current_task_id": str(pipeline.current_task_id) if pipeline.current_task_id else None,
+        "blocked_at_gate_id": str(pipeline.blocked_at_gate_id) if pipeline.blocked_at_gate_id else None,
+        "last_completed_stage": pipeline.last_completed_stage,
+        "last_completed_at": pipeline.last_completed_at.isoformat() if pipeline.last_completed_at else None,
+    }
+
+
+@app.get("/api/agents/tasks/{task_id}/dossier.pdf")
+async def download_dossier_pdf(task_id: str, db: AsyncSession = Depends(get_db)):
+    """Download the dossier from a completed dossier task as a PDF."""
+    task = await db.get(AgentTaskDB, _parse_uuid(task_id))
+    if not task:
+        raise HTTPException(404, "Task not found")
+    if task.agent_type != "dossier":
+        raise HTTPException(400, "Task is not a dossier task")
+    if task.status not in ("completed", "blocked"):
+        raise HTTPException(400, f"Dossier not ready (status: {task.status})")
+
+    dossier = (task.output_data or {}).get("dossier")
+    if not dossier:
+        raise HTTPException(404, "No dossier data found in task output")
+
+    patient_data = task.input_data.get("patient")
+    result = render_dossier_pdf(dossier, patient_data)
+    if not result.success:
+        raise HTTPException(500, f"PDF generation failed: {result.error}")
+
+    from starlette.responses import Response
+
+    return Response(
+        content=result.data,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename=kyriaki_dossier_{task_id[:8]}.pdf"},
+    )
 
 
 @app.post("/api/agents/gates/{gate_id}/resolve")
