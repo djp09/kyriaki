@@ -24,11 +24,13 @@ from database import async_session, get_db
 from db_models import AgentEventDB, AgentTaskDB, HumanGateDB, TaskStatus, TrialWatchDB
 from db_service import (
     get_patient_activity,
+    get_patient_versions,
     get_task_with_gates,
     list_events_for_task,
     list_gates,
     list_tasks_for_patient,
     save_patient_profile,
+    update_patient_profile,
 )
 from dispatcher import (
     dispatch_background,
@@ -695,6 +697,33 @@ async def resolve_gate(gate_id: str, resolution: GateResolution, db: AsyncSessio
             )
 
     return {"status": "resolved", "gate_status": resolution.status}
+
+
+@app.put("/api/patients/{patient_id}/profile")
+async def update_profile(patient_id: str, patient: PatientProfile, db: AsyncSession = Depends(get_db)):
+    """Update a patient's profile. Creates a version snapshot of the previous state."""
+    pid = _parse_uuid(patient_id)
+    updates = patient.model_dump(exclude_none=True)
+    updated = await update_patient_profile(db, pid, updates)
+    if not updated:
+        raise HTTPException(404, "Patient not found")
+    return {"status": "updated", "version": updated.version}
+
+
+@app.get("/api/patients/{patient_id}/versions")
+async def list_profile_versions(patient_id: str, db: AsyncSession = Depends(get_db)):
+    """Get version history for a patient's profile."""
+    pid = _parse_uuid(patient_id)
+    versions = await get_patient_versions(db, pid)
+    return [
+        {
+            "version": v.version,
+            "profile_snapshot": v.profile_snapshot,
+            "change_summary": v.change_summary,
+            "created_at": v.created_at.isoformat() if v.created_at else "",
+        }
+        for v in versions
+    ]
 
 
 @app.get("/api/patients/{patient_id}/activity")

@@ -8,7 +8,15 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload
 
-from db_models import AgentEventDB, AgentTaskDB, HumanGateDB, MatchResultDB, MatchSessionDB, PatientProfileDB
+from db_models import (
+    AgentEventDB,
+    AgentTaskDB,
+    HumanGateDB,
+    MatchResultDB,
+    MatchSessionDB,
+    PatientProfileDB,
+    PatientProfileVersionDB,
+)
 
 
 async def save_patient_profile(session: AsyncSession, profile_data: dict) -> PatientProfileDB:
@@ -17,6 +25,88 @@ async def save_patient_profile(session: AsyncSession, profile_data: dict) -> Pat
     session.add(patient)
     await session.flush()
     return patient
+
+
+def _profile_to_snapshot(patient: PatientProfileDB) -> dict:
+    """Convert a PatientProfileDB to a JSON-serializable snapshot."""
+    return {
+        "cancer_type": patient.cancer_type,
+        "cancer_stage": patient.cancer_stage,
+        "biomarkers": patient.biomarkers,
+        "prior_treatments": patient.prior_treatments,
+        "lines_of_therapy": patient.lines_of_therapy,
+        "age": patient.age,
+        "sex": patient.sex,
+        "ecog_score": patient.ecog_score,
+        "key_labs": patient.key_labs,
+        "location_zip": patient.location_zip,
+        "willing_to_travel_miles": patient.willing_to_travel_miles,
+        "additional_conditions": patient.additional_conditions,
+        "additional_notes": patient.additional_notes,
+    }
+
+
+def _diff_profiles(old: dict, new: dict) -> str:
+    """Generate a human-readable summary of what changed between profiles."""
+    changes = []
+    for key in new:
+        old_val = old.get(key)
+        new_val = new.get(key)
+        if old_val != new_val:
+            label = key.replace("_", " ").title()
+            changes.append(f"{label}: {old_val!r} -> {new_val!r}")
+    return "; ".join(changes) if changes else "No changes"
+
+
+async def update_patient_profile(
+    session: AsyncSession,
+    patient_id: UUID,
+    updates: dict,
+) -> PatientProfileDB | None:
+    """Update a patient profile and create a version snapshot of the old state.
+
+    Returns the updated patient, or None if not found.
+    """
+    patient = await session.get(PatientProfileDB, patient_id)
+    if not patient:
+        return None
+
+    # Snapshot the current state before changes
+    old_snapshot = _profile_to_snapshot(patient)
+
+    # Apply updates (only fields that are present and non-None)
+    for key, value in updates.items():
+        if hasattr(patient, key) and key not in ("id", "created_at", "updated_at", "version"):
+            setattr(patient, key, value)
+
+    new_snapshot = _profile_to_snapshot(patient)
+    change_summary = _diff_profiles(old_snapshot, new_snapshot)
+
+    # Save version record
+    session.add(
+        PatientProfileVersionDB(
+            patient_id=patient_id,
+            version=patient.version,
+            profile_snapshot=old_snapshot,
+            change_summary=change_summary,
+        )
+    )
+
+    # Bump version
+    patient.version = patient.version + 1
+    await session.flush()
+    return patient
+
+
+async def get_patient_versions(session: AsyncSession, patient_id: UUID) -> list[PatientProfileVersionDB]:
+    """Get all version snapshots for a patient, newest first."""
+    stmt = (
+        select(PatientProfileVersionDB)
+        .where(PatientProfileVersionDB.patient_id == patient_id)
+        .order_by(PatientProfileVersionDB.version.desc())
+    )
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
 
 
 async def save_match_session(

@@ -990,6 +990,85 @@ class TestPipelineEndpoints:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(_is_postgres, reason="Uses SQLite test DB")
+class TestProfileVersioning:
+    @pytest_asyncio.fixture
+    async def db_session(self):
+        from database import async_session, engine
+        from db_models import Base
+
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.drop_all)
+            await conn.run_sync(Base.metadata.create_all)
+        async with async_session() as session:
+            yield session
+
+    @pytest.mark.asyncio
+    async def test_update_creates_version(self, db_session):
+        from db_models import PatientProfileDB
+        from db_service import get_patient_versions, update_patient_profile
+
+        patient = PatientProfileDB(
+            cancer_type="NSCLC",
+            cancer_stage="Stage IV",
+            age=62,
+            sex="male",
+            location_zip="10001",
+            biomarkers=["EGFR+"],
+            prior_treatments=[],
+            lines_of_therapy=0,
+        )
+        db_session.add(patient)
+        await db_session.flush()
+
+        updated = await update_patient_profile(
+            db_session,
+            patient.id,
+            {"cancer_stage": "Stage IIIB", "biomarkers": ["EGFR+", "PD-L1 80%"]},
+        )
+
+        assert updated is not None
+        assert updated.version == 2
+        assert updated.cancer_stage == "Stage IIIB"
+
+        versions = await get_patient_versions(db_session, patient.id)
+        assert len(versions) == 1
+        assert versions[0].version == 1
+        assert versions[0].profile_snapshot["cancer_stage"] == "Stage IV"
+        assert "Stage" in versions[0].change_summary
+
+    @pytest.mark.asyncio
+    async def test_multiple_updates(self, db_session):
+        from db_models import PatientProfileDB
+        from db_service import get_patient_versions, update_patient_profile
+
+        patient = PatientProfileDB(
+            cancer_type="TNBC",
+            cancer_stage="Stage IV",
+            age=45,
+            sex="female",
+            location_zip="90210",
+            biomarkers=[],
+            prior_treatments=[],
+        )
+        db_session.add(patient)
+        await db_session.flush()
+
+        await update_patient_profile(db_session, patient.id, {"lines_of_therapy": 1})
+        await update_patient_profile(db_session, patient.id, {"lines_of_therapy": 2, "ecog_score": 1})
+
+        assert patient.version == 3
+        versions = await get_patient_versions(db_session, patient.id)
+        assert len(versions) == 2
+
+    @pytest.mark.asyncio
+    async def test_update_nonexistent_returns_none(self, db_session):
+        from db_service import update_patient_profile
+
+        result = await update_patient_profile(db_session, uuid.uuid4(), {"age": 50})
+        assert result is None
+
+
 class TestPDFRenderer:
     def test_render_basic_dossier(self):
         from tools.pdf_renderer import render_dossier_pdf

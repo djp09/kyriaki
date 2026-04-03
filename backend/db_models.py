@@ -42,11 +42,35 @@ class PatientProfileDB(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
 
+    version: Mapped[int] = mapped_column(Integer, default=1)
+
     match_sessions: Mapped[list[MatchSessionDB]] = relationship(back_populates="patient", cascade="all, delete-orphan")
 
     __table_args__ = (
         Index("ix_patient_cancer_type", "cancer_type"),
         Index("ix_patient_created_at", "created_at"),
+    )
+
+
+class PatientProfileVersionDB(Base):
+    """Immutable snapshot of a patient profile at a point in time.
+
+    Created whenever a patient updates their profile. The current
+    profile in PatientProfileDB is always the latest version.
+    """
+
+    __tablename__ = "patient_profile_versions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    patient_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("patient_profiles.id"), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    profile_snapshot: Mapped[dict] = mapped_column(JSON, nullable=False)
+    change_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    __table_args__ = (
+        Index("ix_profile_version_patient", "patient_id"),
+        Index("ix_profile_version_number", "patient_id", "version", unique=True),
     )
 
 
