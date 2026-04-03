@@ -770,6 +770,15 @@ class DossierAgent(BaseAgent):
         if not match:
             return f"Trial {nct_id} not in top matches", False
 
+        # Guard: don't re-analyze a trial that's already been analyzed
+        if nct_id in scratchpad.state["sections"]:
+            existing = scratchpad.state["sections"][nct_id]
+            score = existing.get("revised_score", "?")
+            return (
+                f"Already analyzed {nct_id} (revised score: {score}). Use investigate_criterion for follow-up or finish.",
+                True,
+            )
+
         settings = scratchpad.state["settings"]
         patient_data = scratchpad.state["patient_data"]
 

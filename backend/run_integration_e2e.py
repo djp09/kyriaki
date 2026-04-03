@@ -148,9 +148,12 @@ async def test_matching_agent(session: AsyncSession, patient: PatientProfileDB) 
 async def test_dossier_agent(
     session: AsyncSession, patient: PatientProfileDB, matching_task: AgentTaskDB
 ) -> AgentTaskDB:
-    """Run the DossierAgent through the dispatcher."""
-    print("\n--- STEP 2: DossierAgent ---")
-    print("Dispatching dossier task (deep Opus analysis, top 1 match)...")
+    """Run the DossierAgent through the dispatcher for a specific trial."""
+    print("\n--- STEP 2: DossierAgent (per-trial) ---")
+    matches = matching_task.output_data.get("matches", [])
+    target_match = matches[0]  # Analyze the top match
+    nct_id = target_match["nct_id"]
+    print(f"Dispatching dossier for {nct_id}: {target_match['brief_title'][:60]}...")
 
     task = await dispatch(
         session,
@@ -158,9 +161,9 @@ async def test_dossier_agent(
         patient.id,
         input_data={
             "patient": matching_task.input_data["patient"],
-            "matches": matching_task.output_data["matches"],
+            "match": target_match,
+            "nct_id": nct_id,
             "patient_summary": matching_task.output_data.get("patient_summary", ""),
-            "top_n": 1,  # Just 1 to keep it fast
         },
         parent_task_id=matching_task.id,
     )
@@ -177,6 +180,7 @@ async def test_dossier_agent(
     if task.output_data and "dossier" in task.output_data:
         dossier = task.output_data["dossier"]
         print(f"  Dossier generated at: {dossier.get('generated_at', '?')}")
+        print(f"  Dossier nct_id: {dossier.get('nct_id', 'MISSING')}")
         print(f"  Sections: {len(dossier.get('sections', []))}")
         for section in dossier.get("sections", []):
             print(f"    Trial: {section.get('nct_id')} — {section.get('brief_title', '')[:60]}")
