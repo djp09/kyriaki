@@ -184,16 +184,18 @@ class TestDispatcher:
 
     @pytest.mark.asyncio
     async def test_dispatch_successful_task(self, sample_patient_data):
-        """Dispatch a matching task with mocked agent loop."""
+        """Dispatch a matching task with mocked direct pipeline."""
         session = FakeSession()
         patient_id = uuid.uuid4()
 
-        mock_scratchpad = _build_matching_scratchpad()
-        mock_loop = AsyncMock(return_value=mock_scratchpad)
+        scratchpad = _build_matching_scratchpad()
+        mock_pool = scratchpad.state["trials_pool"]
+        mock_analyses = scratchpad.state["analyses"]
         mock_summary = AsyncMock(return_value=ToolResult(success=True, data="Summary"))
 
         with (
-            patch("agents.run_agent_loop", mock_loop),
+            patch.object(MatchingAgent, "_do_search", AsyncMock(return_value=mock_pool)),
+            patch.object(MatchingAgent, "_do_prescreen_and_analyze", AsyncMock(return_value=mock_analyses)),
             patch("agents.claude_text_call", mock_summary),
         ):
             task = await dispatch(
@@ -216,8 +218,8 @@ class TestDispatcher:
         session = FakeSession()
         patient_id = uuid.uuid4()
 
-        mock_loop = AsyncMock(side_effect=RuntimeError("API down"))
-        with patch("agents.run_agent_loop", mock_loop):
+        mock_search = AsyncMock(side_effect=RuntimeError("API down"))
+        with patch("agents.search_and_merge_tool", mock_search):
             task = await dispatch(
                 session, "matching", patient_id, input_data={"patient": sample_patient_data, "max_results": 10}
             )
@@ -306,7 +308,7 @@ class TestDispatcher:
 class TestMatchingAgent:
     @pytest.mark.asyncio
     async def test_execute_returns_matches(self, sample_patient_data):
-        """MatchingAgent produces matches via the agent loop."""
+        """MatchingAgent produces matches via direct pipeline (simple patient)."""
         agent = MatchingAgent()
         emitted = []
 
@@ -320,12 +322,14 @@ class TestMatchingAgent:
             emit=mock_emit,
         )
 
-        mock_scratchpad = _build_matching_scratchpad()
-        mock_loop = AsyncMock(return_value=mock_scratchpad)
+        scratchpad = _build_matching_scratchpad()
+        mock_pool = scratchpad.state["trials_pool"]
+        mock_analyses = scratchpad.state["analyses"]
         mock_summary = AsyncMock(return_value=ToolResult(success=True, data="Summary text"))
 
         with (
-            patch("agents.run_agent_loop", mock_loop),
+            patch.object(agent, "_do_search", AsyncMock(return_value=mock_pool)),
+            patch.object(agent, "_do_prescreen_and_analyze", AsyncMock(return_value=mock_analyses)),
             patch("agents.claude_text_call", mock_summary),
         ):
             result = await agent.execute(ctx)
@@ -347,9 +351,9 @@ class TestMatchingAgent:
             task_id=uuid.uuid4(), patient_id=uuid.uuid4(), input_data={"patient": sample_patient_data}, emit=mock_emit
         )
 
-        mock_loop = AsyncMock(side_effect=RuntimeError("boom"))
+        mock_search = AsyncMock(side_effect=RuntimeError("boom"))
         with (
-            patch("agents.run_agent_loop", mock_loop),
+            patch.object(agent, "_do_search", mock_search),
             pytest.raises(RuntimeError, match="boom"),
         ):
             await agent.execute(ctx)
@@ -768,8 +772,8 @@ class TestTokenTracking:
         assert total.total_tokens == 0
 
     @pytest.mark.asyncio
-    async def test_matching_agent_includes_token_usage(self, sample_patient_data):
-        """MatchingAgent output_data includes token_usage."""
+    async def test_matching_agent_returns_results(self, sample_patient_data):
+        """MatchingAgent output_data includes matches and screening count."""
         agent = MatchingAgent()
 
         async def mock_emit(event_type, data=None):
@@ -782,25 +786,21 @@ class TestTokenTracking:
             emit=mock_emit,
         )
 
-        mock_scratchpad = _build_matching_scratchpad()
-        # Add token usage to scratchpad entries
-        mock_scratchpad.entries[0].token_usage = TokenUsage(500, 100)
-        mock_scratchpad.entries[1].token_usage = TokenUsage(800, 200)
-
-        mock_loop = AsyncMock(return_value=mock_scratchpad)
+        scratchpad = _build_matching_scratchpad()
+        mock_pool = scratchpad.state["trials_pool"]
+        mock_analyses = scratchpad.state["analyses"]
         mock_summary = AsyncMock(return_value=ToolResult(success=True, data="Summary"))
 
         with (
-            patch("agents.run_agent_loop", mock_loop),
+            patch.object(agent, "_do_search", AsyncMock(return_value=mock_pool)),
+            patch.object(agent, "_do_prescreen_and_analyze", AsyncMock(return_value=mock_analyses)),
             patch("agents.claude_text_call", mock_summary),
         ):
             result = await agent.execute(ctx)
 
         assert result.success
-        assert "token_usage" in result.output_data
-        assert result.output_data["token_usage"]["input_tokens"] == 1300
-        assert result.output_data["token_usage"]["output_tokens"] == 300
-        assert result.output_data["token_usage"]["total_tokens"] == 1600
+        assert result.output_data["total_trials_screened"] == 1
+        assert len(result.output_data["matches"]) == 1
 
 
 # ---------------------------------------------------------------------------

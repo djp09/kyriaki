@@ -264,7 +264,6 @@ class MatchingAgent(BaseAgent):
 
         # Route: classify patient complexity → configure budget and strategy
         route = classify_patient(patient)
-        budget = route.to_budget()
 
         # Run enrichments concurrently: patient summary, biomarker lookup, drug normalization
         summary_task = asyncio.create_task(self._generate_summary(patient))
@@ -288,6 +287,70 @@ class MatchingAgent(BaseAgent):
                     normalized_treatments.append(t)
             patient_vars["prior_treatments"] = ", ".join(normalized_treatments) or "None"
 
+        # Simple patients: direct pipeline (no agent loop planning overhead)
+        # Moderate/complex patients: adaptive agent loop with planning
+        if route.complexity == "simple":
+            pool, analyses = await self._run_direct_pipeline(
+                patient, settings, biomarker_context, ctx.emit,
+            )
+        else:
+            pool, analyses = await self._run_agent_loop_pipeline(
+                patient, max_results, settings, route, patient_vars,
+                biomarker_context, drug_map, ctx.emit,
+            )
+
+        # Build final result
+        patient_summary = await summary_task
+        matches = self._build_final_matches_from(pool, analyses, patient, max_results)
+        matches_data = [m.model_dump() for m in matches]
+
+        return AgentResult(
+            success=True,
+            output_data={
+                "patient_summary": patient_summary,
+                "matches": matches_data,
+                "total_trials_screened": len(pool),
+            },
+        )
+
+    async def _run_direct_pipeline(
+        self,
+        patient: PatientProfile,
+        settings,
+        biomarker_context: str,
+        emit,
+    ) -> tuple[dict, dict]:
+        """Fast path for simple patients: search → prescreen → deep analyze. No planning calls."""
+        logger.info("matching.direct_pipeline_start")
+
+        if emit:
+            await emit("progress", {"step": "searching_trials", "iteration": 1, "reasoning": "Searching for trials"})
+
+        pool = await self._do_search(patient)
+        logger.info("matching.direct_search_complete", trials=len(pool))
+
+        if emit:
+            await emit("progress", {"step": "analyzing_trials", "iteration": 2, "reasoning": "Analyzing eligibility"})
+
+        analyses = await self._do_prescreen_and_analyze(pool, patient, settings, biomarker_context, max_deep=5)
+        logger.info("matching.direct_pipeline_complete", analyzed=len(analyses), pool=len(pool))
+
+        return pool, analyses
+
+    async def _run_agent_loop_pipeline(
+        self,
+        patient: PatientProfile,
+        max_results: int,
+        settings,
+        route,
+        patient_vars: dict,
+        biomarker_context: str,
+        drug_map: dict,
+        emit,
+    ) -> tuple[dict, dict]:
+        """Adaptive path for moderate/complex patients: full ReAct agent loop."""
+        budget = route.to_budget()
+
         prompt_vars = {
             **patient_vars,
             "location_zip": patient.location_zip,
@@ -295,57 +358,128 @@ class MatchingAgent(BaseAgent):
             "strategy_hint": route.strategy_hint,
         }
 
-        # Agent-specific state stored in scratchpad
         scratchpad = Scratchpad(
             state={
                 "patient": patient,
                 "max_results": max_results,
-                "trials_pool": {},  # nct_id → trial dict (deduplicated)
-                "analyses": {},  # nct_id → analysis dict
+                "trials_pool": {},
+                "analyses": {},
                 "settings": settings,
                 "route": route,
-                "biomarker_context": biomarker_context,  # CIViC enrichment for prompts
-                "drug_map": drug_map,  # RxNorm normalized drug names
+                "biomarker_context": biomarker_context,
+                "drug_map": drug_map,
             }
         )
 
-        # Define action handlers
         handlers = {
             "search": self._handle_search,
             "analyze_batch": self._handle_analyze_batch,
             "evaluate": self._handle_evaluate,
         }
 
-        # Run the adaptive loop with routed budget
         scratchpad = await run_agent_loop(
             orchestrator_prompt_template=MATCHING_ORCHESTRATOR_PROMPT,
             prompt_vars=prompt_vars,
             action_handlers=handlers,
             scratchpad=scratchpad,
             budget=budget,
-            emit=ctx.emit,
+            emit=emit,
             tool_definitions=MATCHING_TOOLS,
         )
 
-        # Build final result from scratchpad state
-        patient_summary = await summary_task
-        matches = self._build_final_matches(scratchpad, patient, max_results)
-        matches_data = [m.model_dump() for m in matches]
+        return scratchpad.state.get("trials_pool", {}), scratchpad.state.get("analyses", {})
 
-        total_tokens = scratchpad.total_token_usage
-        return AgentResult(
-            success=True,
-            output_data={
-                "patient_summary": patient_summary,
-                "matches": matches_data,
-                "total_trials_screened": len(scratchpad.state.get("trials_pool", {})),
-                "token_usage": {
-                    "input_tokens": total_tokens.input_tokens,
-                    "output_tokens": total_tokens.output_tokens,
-                    "total_tokens": total_tokens.total_tokens,
-                },
-            },
+    async def _do_search(self, patient: PatientProfile) -> dict:
+        """Core search logic: query ClinicalTrials.gov + NCI, return deduplicated pool."""
+        result = await search_and_merge_tool(
+            cancer_type=patient.cancer_type,
+            age=patient.age,
+            sex=patient.sex,
+            page_size=20,
+            include_nci=True,
         )
+        if not result.success:
+            logger.warning("matching.search_failed", error=result.error)
+            return {}
+
+        pool = {}
+        for trial in result.data:
+            pool[trial["nct_id"]] = trial
+        return pool
+
+    async def _do_prescreen_and_analyze(
+        self,
+        pool: dict,
+        patient: PatientProfile,
+        settings,
+        biomarker_context: str,
+        max_deep: int = 5,
+    ) -> dict:
+        """Core prescreen + deep analysis logic. Returns analyses dict."""
+        from prompts import PRESCREEN_PROMPT
+
+        analyses: dict = {}
+        if not pool:
+            return analyses
+
+        MAX_PRESCREEN = 30
+        unanalyzed = dict(list(pool.items())[:MAX_PRESCREEN])
+
+        # --- Tier 1: Fast pre-screen ---
+        trials_list_lines = []
+        for trial in unanalyzed.values():
+            trials_list_lines.append(
+                f"- **{trial['nct_id']}**: {trial['brief_title']}\n"
+                f"  Phase: {trial['phase']} | Conditions: {', '.join(trial.get('conditions', []))}\n"
+                f"  Summary: {trial['brief_summary'][:200]}"
+            )
+
+        patient_vars = format_patient_for_prompt(patient)
+        prescreen_prompt = PRESCREEN_PROMPT.format(
+            **patient_vars,
+            trials_list="\n".join(trials_list_lines),
+        )
+
+        prescreen_result = await claude_json_call(prescreen_prompt, max_tokens=1200)
+        if not prescreen_result.success:
+            high_tier_ids = list(unanalyzed.keys())[:max_deep]
+        else:
+            rankings = prescreen_result.data.get("rankings", [])
+            high_tier_ids = [r["nct_id"] for r in rankings if r.get("tier") == "HIGH"]
+            logger.info("matching.prescreen", total=len(rankings), high=len(high_tier_ids), low=len(rankings) - len(high_tier_ids))
+
+            for r in rankings:
+                if r.get("tier") == "LOW" and r["nct_id"] not in analyses:
+                    analyses[r["nct_id"]] = {
+                        "match_score": 0,
+                        "match_tier": "EXCLUDED",
+                        "match_explanation": f"Pre-screen: {r.get('reason', 'Not relevant')}",
+                        "inclusion_evaluations": [],
+                        "exclusion_evaluations": [],
+                        "flags_for_oncologist": [],
+                        "criteria_met": 0,
+                        "criteria_not_met": 0,
+                        "criteria_unknown": 0,
+                        "criteria_total": 0,
+                    }
+
+        if not high_tier_ids:
+            return analyses
+
+        # --- Tier 2: Deep analysis on HIGH-tier ---
+        to_analyze = [unanalyzed[nid] for nid in high_tier_ids[:max_deep] if nid in unanalyzed]
+
+        async def analyze_one(trial: dict) -> tuple[str, dict | None]:
+            result = await self._analyze_single_trial(patient, trial, settings, biomarker_context)
+            return trial["nct_id"], result
+
+        results = await asyncio.gather(*[analyze_one(t) for t in to_analyze])
+
+        for nct_id, analysis in results:
+            if analysis is not None:
+                analyses[nct_id] = analysis
+
+        return analyses
 
     async def _handle_search(
         self, decision: AgentDecision, scratchpad: Scratchpad, budget: AgentBudget
@@ -502,8 +636,7 @@ class MatchingAgent(BaseAgent):
         if not borderline:
             return "No borderline scores to evaluate", True
 
-        adjusted_count = 0
-        for nct_id, analysis in borderline:
+        async def _eval_one(nct_id: str, analysis: dict) -> bool:
             trial = pool[nct_id]
             eligibility_text = trial["eligibility_criteria"][:6000]
 
@@ -529,7 +662,11 @@ class MatchingAgent(BaseAgent):
                 analysis.setdefault("flags_for_oncologist", []).append(
                     f"Score adjusted from {old} to {result.data['adjusted_score']}: {result.data['adjustment_reason']}"
                 )
-                adjusted_count += 1
+                return True
+            return False
+
+        results = await asyncio.gather(*[_eval_one(nct_id, analysis) for nct_id, analysis in borderline])
+        adjusted_count = sum(1 for r in results if r)
 
         return f"Evaluated {len(borderline)} borderline scores, adjusted {adjusted_count}", True
 
@@ -594,17 +731,21 @@ class MatchingAgent(BaseAgent):
         if not prompt_result.success:
             return None
 
+        # Adaptive max_tokens: scale with criteria count to avoid truncation
+        analysis_max_tokens = min(2500, max(1200, len(criteria_lines) * 120))
+
         for attempt in range(settings.max_retries + 1):
             try:
                 response = await paced_claude_call(
                     get_claude_client(),
                     model=settings.claude_model,
-                    max_tokens=1500,
+                    max_tokens=analysis_max_tokens,
                     messages=[{"role": "user", "content": prompt_result.data}],
                 )
                 text = response.content[0].text.strip()
                 result = parse_json_response(text)
                 if result is None:
+                    logger.warning("analysis.parse_failed", nct_id=nct_id, attempt=attempt + 1, text_preview=text[:200])
                     if attempt < settings.max_retries:
                         continue
                     return None
@@ -612,6 +753,7 @@ class MatchingAgent(BaseAgent):
                 # Step 3: Score programmatically from criterion evaluations
                 evals = result.get("criterion_evaluations", [])
                 if not evals:
+                    logger.warning("analysis.no_evals", nct_id=nct_id, attempt=attempt + 1, keys=list(result.keys()))
                     if attempt < settings.max_retries:
                         continue
                     return None
@@ -627,6 +769,7 @@ class MatchingAgent(BaseAgent):
 
                 flags = result.get("flags_for_oncologist", [])
                 score_result = calculate_match_score(evals, flags)
+                logger.info("analysis.scored", nct_id=nct_id, score=score_result["score"], tier=score_result["tier"])
 
                 # Build the analysis dict in the shape downstream expects
                 inclusion_evals = [e for e in evals if e.get("type") == "inclusion"]
@@ -674,16 +817,15 @@ class MatchingAgent(BaseAgent):
                 return None
         return None
 
-    def _build_final_matches(self, scratchpad: Scratchpad, patient: PatientProfile, max_results: int):
-        """Build ranked TrialMatch list from scratchpad state."""
+    def _build_final_matches_from(
+        self, pool: dict, analyses: dict, patient: PatientProfile, max_results: int
+    ):
+        """Build ranked TrialMatch list from pool and analyses dicts."""
         from models import TrialMatch
 
-        pool = scratchpad.state.get("trials_pool", {})
-        analyses = scratchpad.state.get("analyses", {})
         matches: list[TrialMatch] = []
 
         if not analyses and pool:
-            # All analyses failed — return unscored matches
             for trial in pool.values():
                 match = build_unscored_match(trial, patient)
                 if match.distance_miles is None or match.distance_miles <= patient.willing_to_travel_miles:
