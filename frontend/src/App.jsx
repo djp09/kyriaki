@@ -354,7 +354,7 @@ export default function App() {
             <div className="loading-progress">
               <div className={`loading-progress-bar ${progressPct == null ? "progress-indeterminate" : ""}`} style={progressPct != null ? { width: `${progressPct}%` } : {}} />
             </div>
-            <p className="loading-patience">This typically takes 15-30 seconds</p>
+            <p className="loading-patience">This typically takes 1-2 minutes as we analyze each trial's criteria</p>
           </div>
         )}
 

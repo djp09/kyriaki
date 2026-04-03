@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     # Agent loop (adaptive matching)
     agent_max_iterations: int = 5
     agent_max_search_calls: int = 3
-    agent_max_analysis_calls: int = 20
+    agent_max_analysis_calls: int = 10  # reduced for faster response times
 
     # Evaluator-optimizer loop
     evaluation_enabled: bool = True

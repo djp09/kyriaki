@@ -396,8 +396,9 @@ class MatchingAgent(BaseAgent):
         if not unanalyzed:
             return "No unanalyzed trials in pool", False
 
-        # Respect budget
-        to_analyze = list(unanalyzed.values())[: budget.analyses_remaining]
+        # Respect budget — cap at 10 trials per batch for responsiveness
+        max_batch = min(budget.analyses_remaining, 10)
+        to_analyze = list(unanalyzed.values())[:max_batch]
         if not to_analyze:
             return "Analysis budget exhausted", False
 
@@ -499,11 +500,23 @@ class MatchingAgent(BaseAgent):
             return None
 
         parsed = parse_result.data
-        # Format parsed criteria for the prompt
+
+        # Prioritize the most important criteria to keep prompts short.
+        # High-priority categories determine eligibility; low-priority are
+        # consent/washout/labs that rarely disqualify.
+        HIGH_PRIORITY = {"diagnosis", "biomarker", "stage", "prior_therapy", "performance", "demographic"}
+
+        def _sort_key(c):
+            return 0 if c["category"] in HIGH_PRIORITY else 1
+
+        MAX_CRITERIA = 15
+        inc = sorted(parsed["inclusion_criteria"], key=_sort_key)[:MAX_CRITERIA]
+        exc = sorted(parsed["exclusion_criteria"], key=_sort_key)[:MAX_CRITERIA]
+
         criteria_lines = []
-        for c in parsed["inclusion_criteria"]:
+        for c in inc:
             criteria_lines.append(f"[{c['id']}] INCLUSION ({c['category']}): {c['text']}")
-        for c in parsed["exclusion_criteria"]:
+        for c in exc:
             criteria_lines.append(f"[{c['id']}] EXCLUSION ({c['category']}): {c['text']}")
         parsed_criteria_text = "\n".join(criteria_lines)
 
@@ -531,7 +544,7 @@ class MatchingAgent(BaseAgent):
                 response = await paced_claude_call(
                     get_claude_client(),
                     model=settings.claude_model,
-                    max_tokens=2500,
+                    max_tokens=1500,
                     messages=[{"role": "user", "content": prompt_result.data}],
                 )
                 text = response.content[0].text.strip()
