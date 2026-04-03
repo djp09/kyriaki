@@ -11,6 +11,18 @@ class Base(DeclarativeBase):
     pass
 
 
+def _set_sqlite_wal(dbapi_conn, connection_record):
+    """Enable WAL mode on SQLite connections for concurrent read/write access.
+
+    Without WAL, SQLite uses file-level locking that blocks background agent
+    tasks from writing while the HTTP request session is active.
+    """
+    cursor = dbapi_conn.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA busy_timeout=5000")
+    cursor.close()
+
+
 def _build_engine():
     settings = get_settings()
     is_sqlite = settings.database_url.startswith("sqlite")
@@ -19,11 +31,16 @@ def _build_engine():
         kwargs.update(connect_args={"check_same_thread": False})
     else:
         kwargs.update(pool_size=10, max_overflow=20, pool_timeout=30, pool_recycle=1800)
-    return create_async_engine(
+    engine = create_async_engine(
         settings.database_url,
         echo=settings.environment == "development" and settings.log_level == "DEBUG",
         **kwargs,
     )
+    if is_sqlite:
+        from sqlalchemy import event
+
+        event.listen(engine.sync_engine, "connect", _set_sqlite_wal)
+    return engine
 
 
 engine = _build_engine()

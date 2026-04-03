@@ -376,7 +376,8 @@ async def _run_in_background(
 
     # Yield control so the HTTP response commits its session first.
     # Critical for SQLite which uses file-level locking.
-    await asyncio.sleep(0.1)
+    logger.info("background.starting", task_id=str(task_id), agent_type=agent_type)
+    await asyncio.sleep(0.5)
 
     try:
         async with async_session() as session:
@@ -384,8 +385,10 @@ async def _run_in_background(
             if not task:
                 logger.error("background.task_not_found", task_id=str(task_id))
                 return
+            logger.info("background.task_loaded", task_id=str(task_id), status=task.status)
             await _execute_task(session, task, agent_type, patient_id, input_data)
             await session.commit()
+            logger.info("background.committed", task_id=str(task_id))
     except Exception as e:
         logger.error("background.unhandled", task_id=str(task_id), error=f"{type(e).__name__}: {e}")
 
