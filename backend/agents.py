@@ -561,9 +561,7 @@ class MatchingAgent(BaseAgent):
         if not patient.biomarkers:
             return ""
         try:
-            result = await enrich_biomarkers_tool(
-                biomarkers=patient.biomarkers, cancer_type=patient.cancer_type
-            )
+            result = await enrich_biomarkers_tool(biomarkers=patient.biomarkers, cancer_type=patient.cancer_type)
             if result.success:
                 return result.data.get("context_block", "")
         except Exception as e:

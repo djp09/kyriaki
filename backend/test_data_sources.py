@@ -147,29 +147,21 @@ class TestRxNormAPI:
         mock_response_approx.status_code = 200
         mock_response_approx.raise_for_status = MagicMock()
         mock_response_approx.json.return_value = {
-            "approximateGroup": {
-                "candidate": [{"rxcui": "12345", "name": "testdrug"}]
-            }
+            "approximateGroup": {"candidate": [{"rxcui": "12345", "name": "testdrug"}]}
         }
 
         mock_response_props = MagicMock()
         mock_response_props.status_code = 200
         mock_response_props.raise_for_status = MagicMock()
-        mock_response_props.json.return_value = {
-            "properties": {"name": "testdrug", "rxcui": "12345"}
-        }
+        mock_response_props.json.return_value = {"properties": {"name": "testdrug", "rxcui": "12345"}}
 
         mock_response_related = MagicMock()
         mock_response_related.status_code = 200
         mock_response_related.raise_for_status = MagicMock()
-        mock_response_related.json.return_value = {
-            "relatedGroup": {"conceptGroup": []}
-        }
+        mock_response_related.json.return_value = {"relatedGroup": {"conceptGroup": []}}
 
         mock_client = AsyncMock()
-        mock_client.get = AsyncMock(
-            side_effect=[mock_response_approx, mock_response_props, mock_response_related]
-        )
+        mock_client.get = AsyncMock(side_effect=[mock_response_approx, mock_response_props, mock_response_related])
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=None)
 

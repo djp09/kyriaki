@@ -26,9 +26,7 @@ async def lookup_gene_tool(*, gene_name: str) -> ToolResult:
     )
 
 
-async def enrich_biomarkers_tool(
-    *, biomarkers: list[str], cancer_type: str | None = None
-) -> ToolResult:
+async def enrich_biomarkers_tool(*, biomarkers: list[str], cancer_type: str | None = None) -> ToolResult:
     """Look up CIViC evidence for patient biomarkers and format for prompt injection."""
     enrichments = await lookup_biomarkers(biomarkers, cancer_type=cancer_type)
     context_block = format_biomarker_context(enrichments)

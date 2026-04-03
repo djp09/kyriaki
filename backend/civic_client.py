@@ -275,27 +275,27 @@ async def lookup_gene(gene_name: str, timeout: float = 15) -> list[VariantEviden
             v_name = variant.get("name", "")
             mp = variant.get("singleVariantMolecularProfile") or {}
             for item in mp.get("evidenceItems", {}).get("nodes", []):
-                    ev_type = item.get("evidenceType", "")
-                    # Only keep therapeutic/predictive evidence for matching
-                    if ev_type.upper() not in ("PREDICTIVE", "THERAPEUTIC", "DIAGNOSTIC", "PROGNOSTIC"):
-                        continue
+                ev_type = item.get("evidenceType", "")
+                # Only keep therapeutic/predictive evidence for matching
+                if ev_type.upper() not in ("PREDICTIVE", "THERAPEUTIC", "DIAGNOSTIC", "PROGNOSTIC"):
+                    continue
 
-                    drugs = [t.get("name", "") for t in item.get("therapies", []) if t.get("name")]
-                    disease = item.get("disease", {}).get("name", "") if item.get("disease") else ""
+                drugs = [t.get("name", "") for t in item.get("therapies", []) if t.get("name")]
+                disease = item.get("disease", {}).get("name", "") if item.get("disease") else ""
 
-                    evidence_list.append(
-                        VariantEvidence(
-                            gene=g_name,
-                            variant=v_name,
-                            disease=disease,
-                            evidence_type=ev_type,
-                            evidence_level=item.get("evidenceLevel", ""),
-                            evidence_direction=item.get("evidenceDirection", ""),
-                            drugs=drugs,
-                            significance=item.get("significance", ""),
-                            description=(item.get("description", "") or "")[:500],
-                        )
+                evidence_list.append(
+                    VariantEvidence(
+                        gene=g_name,
+                        variant=v_name,
+                        disease=disease,
+                        evidence_type=ev_type,
+                        evidence_level=item.get("evidenceLevel", ""),
+                        evidence_direction=item.get("evidenceDirection", ""),
+                        drugs=drugs,
+                        significance=item.get("significance", ""),
+                        description=(item.get("description", "") or "")[:500],
                     )
+                )
 
         # Sort: therapeutic/predictive first, then by evidence level (A > B > C > D > E)
         level_order = {"A": 0, "B": 1, "C": 2, "D": 3, "E": 4}
@@ -442,7 +442,9 @@ async def lookup_variant(gene_name: str, variant_name: str, timeout: float = 15)
         return evidence_list
 
     except (httpx.HTTPError, KeyError, ValueError) as e:
-        logger.warning("civic.variant_api_error", gene=gene_name, variant=variant_name, error=f"{type(e).__name__}: {e}")
+        logger.warning(
+            "civic.variant_api_error", gene=gene_name, variant=variant_name, error=f"{type(e).__name__}: {e}"
+        )
         return []
 
 
@@ -514,10 +516,7 @@ async def lookup_biomarkers(
         # Check for trailing "-" (e.g., "ALK-", "HER2-") but NOT hyphens in names (e.g., "PD-L1")
         bio_lower = biomarker.lower().strip()
         is_negative = (
-            bio_lower.endswith("-")
-            or "negative" in bio_lower
-            or "absent" in bio_lower
-            or "not detected" in bio_lower
+            bio_lower.endswith("-") or "negative" in bio_lower or "absent" in bio_lower or "not detected" in bio_lower
         )
         is_positive = not is_negative
 
