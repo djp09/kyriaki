@@ -1455,3 +1455,41 @@ header h1 {
   color: #9ca3af;
   text-align: center;
 }
+
+/* Confirm step after extraction */
+.doc-confirm {
+  border-top: 1px solid #f1f5f9;
+  padding-top: 1rem;
+}
+
+.doc-confirm h4 {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #374151;
+  margin-bottom: 0.75rem;
+}
+
+.doc-confirm .field {
+  margin-bottom: 0.75rem;
+}
+
+.doc-confirm .field label {
+  display: block;
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: #4b5563;
+  margin-bottom: 0.25rem;
+}
+
+.doc-confirm .field input,
+.doc-confirm .field select {
+  width: 100%;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  font-size: 0.9rem;
+}
+
+.doc-confirm .doc-actions {
+  margin-top: 1rem;
+}

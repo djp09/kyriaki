@@ -1,0 +1,545 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Surgical Pathology Report — Meridian Health System</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap');
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  @page {
+    size: letter;
+    margin: 0.6in 0.75in;
+  }
+
+  body {
+    font-family: 'IBM Plex Sans', 'Helvetica Neue', Arial, sans-serif;
+    font-size: 10.5pt;
+    color: #1a1a1a;
+    background: #f0f0f0;
+    line-height: 1.45;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  .page {
+    width: 8.5in;
+    min-height: 11in;
+    margin: 0.5in auto;
+    background: white;
+    padding: 0.6in 0.75in;
+    box-shadow: 0 2px 20px rgba(0,0,0,0.12);
+    position: relative;
+  }
+
+  @media print {
+    body { background: white; }
+    .page { box-shadow: none; margin: 0; padding: 0; width: 100%; min-height: auto; }
+  }
+
+  /* — Header — */
+  .header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    padding-bottom: 12pt;
+    border-bottom: 2.5pt solid #1a3a5c;
+    margin-bottom: 14pt;
+  }
+
+  .hospital-brand {
+    display: flex;
+    align-items: center;
+    gap: 12pt;
+  }
+
+  .hospital-logo {
+    width: 48pt;
+    height: 48pt;
+    background: #1a3a5c;
+    border-radius: 6pt;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: white;
+    font-size: 22pt;
+    font-weight: 700;
+    letter-spacing: -0.5pt;
+    font-family: 'IBM Plex Sans', sans-serif;
+  }
+
+  .hospital-info h1 {
+    font-size: 15pt;
+    font-weight: 700;
+    color: #1a3a5c;
+    letter-spacing: 0.3pt;
+  }
+
+  .hospital-info p {
+    font-size: 8pt;
+    color: #5a5a5a;
+    line-height: 1.5;
+  }
+
+  .report-type-badge {
+    background: #1a3a5c;
+    color: white;
+    font-size: 8pt;
+    font-weight: 600;
+    padding: 4pt 10pt;
+    letter-spacing: 1.2pt;
+    text-transform: uppercase;
+    border-radius: 2pt;
+    margin-top: 2pt;
+  }
+
+  /* — Sections — */
+  .section {
+    margin-bottom: 12pt;
+  }
+
+  .section-title {
+    font-size: 8.5pt;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1.5pt;
+    color: #1a3a5c;
+    border-bottom: 1pt solid #c8d4e0;
+    padding-bottom: 3pt;
+    margin-bottom: 8pt;
+  }
+
+  /* — Data Grid — */
+  .data-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 2pt 24pt;
+  }
+
+  .data-grid.three-col {
+    grid-template-columns: 1fr 1fr 1fr;
+  }
+
+  .data-row {
+    display: flex;
+    gap: 6pt;
+    padding: 2pt 0;
+  }
+
+  .data-label {
+    font-size: 8.5pt;
+    font-weight: 500;
+    color: #6a6a6a;
+    text-transform: uppercase;
+    letter-spacing: 0.5pt;
+    min-width: 100pt;
+    flex-shrink: 0;
+  }
+
+  .data-value {
+    font-family: 'IBM Plex Mono', 'Courier New', monospace;
+    font-size: 10pt;
+    font-weight: 500;
+    color: #1a1a1a;
+  }
+
+  .data-value.highlight {
+    color: #1a3a5c;
+    font-weight: 600;
+  }
+
+  /* — Diagnosis Block — */
+  .diagnosis-block {
+    background: #f6f8fb;
+    border: 1pt solid #d4dde8;
+    border-left: 3.5pt solid #1a3a5c;
+    padding: 10pt 14pt;
+    margin: 8pt 0;
+  }
+
+  .diagnosis-block p {
+    font-size: 10.5pt;
+    line-height: 1.6;
+  }
+
+  .diagnosis-block .primary {
+    font-weight: 600;
+    font-size: 11pt;
+    color: #1a1a1a;
+    margin-bottom: 4pt;
+  }
+
+  .diagnosis-block .detail {
+    color: #3a3a3a;
+    font-size: 10pt;
+  }
+
+  /* — Biomarker Panel — */
+  .biomarker-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 9.5pt;
+    margin-top: 6pt;
+  }
+
+  .biomarker-table thead th {
+    background: #1a3a5c;
+    color: white;
+    font-size: 7.5pt;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1pt;
+    padding: 5pt 8pt;
+    text-align: left;
+    border: none;
+  }
+
+  .biomarker-table thead th:first-child { border-radius: 2pt 0 0 0; }
+  .biomarker-table thead th:last-child { border-radius: 0 2pt 0 0; }
+
+  .biomarker-table tbody td {
+    padding: 5pt 8pt;
+    border-bottom: 0.5pt solid #e0e0e0;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 9pt;
+  }
+
+  .biomarker-table tbody tr:nth-child(even) td {
+    background: #f9fafb;
+  }
+
+  .result-positive {
+    color: #b45309;
+    font-weight: 600;
+  }
+
+  .result-negative {
+    color: #15803d;
+    font-weight: 500;
+  }
+
+  .result-value {
+    font-weight: 600;
+    color: #1a1a1a;
+  }
+
+  .method-tag {
+    font-family: 'IBM Plex Sans', sans-serif;
+    font-size: 7.5pt;
+    color: #6a6a6a;
+    background: #eef1f5;
+    padding: 1pt 5pt;
+    border-radius: 2pt;
+    display: inline-block;
+  }
+
+  /* — Microscopic / Notes — */
+  .narrative {
+    font-size: 10pt;
+    line-height: 1.7;
+    color: #2a2a2a;
+    text-align: justify;
+  }
+
+  /* — Signature — */
+  .signature-block {
+    margin-top: 24pt;
+    padding-top: 12pt;
+    border-top: 1pt solid #d0d0d0;
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+  }
+
+  .signature-left .sig-name {
+    font-size: 11pt;
+    font-weight: 600;
+    color: #1a1a1a;
+    font-style: italic;
+    font-family: 'Georgia', 'Times New Roman', serif;
+    margin-bottom: 2pt;
+  }
+
+  .signature-left .sig-title {
+    font-size: 8.5pt;
+    color: #5a5a5a;
+  }
+
+  .signature-right {
+    text-align: right;
+    font-size: 8.5pt;
+    color: #5a5a5a;
+  }
+
+  .signature-right .sig-date {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 9pt;
+    color: #1a1a1a;
+    font-weight: 500;
+  }
+
+  /* — Footer — */
+  .footer {
+    margin-top: 20pt;
+    padding-top: 8pt;
+    border-top: 0.5pt solid #d0d0d0;
+    font-size: 7pt;
+    color: #999;
+    display: flex;
+    justify-content: space-between;
+  }
+
+  .confidential-stamp {
+    font-size: 7pt;
+    font-weight: 600;
+    letter-spacing: 2pt;
+    text-transform: uppercase;
+    color: #c0392b;
+    opacity: 0.7;
+    position: absolute;
+    bottom: 0.6in;
+    right: 0.75in;
+  }
+
+  /* — Accession bar — */
+  .accession-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: #f2f4f7;
+    padding: 5pt 10pt;
+    border-radius: 2pt;
+    margin-bottom: 12pt;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 9pt;
+  }
+
+  .accession-bar .acc-label {
+    font-family: 'IBM Plex Sans', sans-serif;
+    font-size: 7.5pt;
+    text-transform: uppercase;
+    letter-spacing: 1pt;
+    color: #6a6a6a;
+    margin-right: 6pt;
+  }
+
+  .accession-bar .acc-value {
+    font-weight: 600;
+    color: #1a3a5c;
+  }
+
+  hr.thin { border: none; border-top: 0.5pt solid #e0e0e0; margin: 10pt 0; }
+</style>
+</head>
+<body>
+
+<div class="page">
+
+  <!-- Header -->
+  <div class="header">
+    <div class="hospital-brand">
+      <div class="hospital-logo">M</div>
+      <div class="hospital-info">
+        <h1>Meridian Health System</h1>
+        <p>Department of Pathology &amp; Laboratory Medicine<br>
+        4200 University Boulevard, Suite 300 &bull; New York, NY 10032<br>
+        Tel: (212) 555-0142 &bull; Fax: (212) 555-0143 &bull; CLIA #: 33D0654321</p>
+      </div>
+    </div>
+    <div class="report-type-badge">Surgical Pathology</div>
+  </div>
+
+  <!-- Accession Bar -->
+  <div class="accession-bar">
+    <span><span class="acc-label">Accession No.</span> <span class="acc-value">SP-2026-004817</span></span>
+    <span><span class="acc-label">Collected</span> <span class="acc-value">2026-02-28</span></span>
+    <span><span class="acc-label">Received</span> <span class="acc-value">2026-03-01</span></span>
+    <span><span class="acc-label">Reported</span> <span class="acc-value">2026-03-08</span></span>
+  </div>
+
+  <!-- Patient Demographics -->
+  <div class="section">
+    <div class="section-title">Patient Information</div>
+    <div class="data-grid">
+      <div class="data-row">
+        <span class="data-label">Patient Name</span>
+        <span class="data-value highlight">DOE, JANE M.</span>
+      </div>
+      <div class="data-row">
+        <span class="data-label">MRN</span>
+        <span class="data-value">12345678</span>
+      </div>
+      <div class="data-row">
+        <span class="data-label">Date of Birth</span>
+        <span class="data-value">03/15/1968 (Age 58)</span>
+      </div>
+      <div class="data-row">
+        <span class="data-label">Sex</span>
+        <span class="data-value">Female</span>
+      </div>
+      <div class="data-row">
+        <span class="data-label">Ordering Physician</span>
+        <span class="data-value">Dr. Robert Chen, MD</span>
+      </div>
+      <div class="data-row">
+        <span class="data-label">Location</span>
+        <span class="data-value">Thoracic Oncology Clinic</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Specimen Information -->
+  <div class="section">
+    <div class="section-title">Specimen</div>
+    <div class="data-grid">
+      <div class="data-row">
+        <span class="data-label">Specimen Type</span>
+        <span class="data-value">CT-guided core needle biopsy, right lower lobe</span>
+      </div>
+      <div class="data-row">
+        <span class="data-label">Laterality</span>
+        <span class="data-value">Right</span>
+      </div>
+      <div class="data-row">
+        <span class="data-label">Procedure Date</span>
+        <span class="data-value">02/28/2026</span>
+      </div>
+      <div class="data-row">
+        <span class="data-label">Clinical History</span>
+        <span class="data-value">58F, 3.2cm RLL mass on CT. Hx: prior Carboplatin/Pemetrexed ×4 cycles.</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Diagnosis -->
+  <div class="section">
+    <div class="section-title">Final Diagnosis</div>
+    <div class="diagnosis-block">
+      <p class="primary">Non-Small Cell Lung Cancer — Adenocarcinoma</p>
+      <p class="detail">
+        Moderately differentiated adenocarcinoma with lepidic and acinar growth patterns.<br>
+        TNM Staging (AJCC 8th Ed.): pT2a N2 M1b — <strong>Stage IV</strong><br>
+        Metastatic sites: contralateral lung nodule, osseous (L3 vertebral body)
+      </p>
+    </div>
+  </div>
+
+  <hr class="thin">
+
+  <!-- Molecular / Biomarker Panel -->
+  <div class="section">
+    <div class="section-title">Molecular &amp; Biomarker Panel</div>
+    <table class="biomarker-table">
+      <thead>
+        <tr>
+          <th>Biomarker</th>
+          <th>Result</th>
+          <th>Interpretation</th>
+          <th>Method</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>EGFR Mutation</td>
+          <td class="result-positive">POSITIVE — L858R (Exon 21)</td>
+          <td>Sensitizing mutation; eligible for EGFR TKI therapy</td>
+          <td><span class="method-tag">NGS — Oncomine Dx</span></td>
+        </tr>
+        <tr>
+          <td>PD-L1 (22C3)</td>
+          <td class="result-value">TPS 40%</td>
+          <td>Positive expression; above 1% threshold, below 50% high-expression cutoff</td>
+          <td><span class="method-tag">IHC — Dako 22C3</span></td>
+        </tr>
+        <tr>
+          <td>ALK Rearrangement</td>
+          <td class="result-negative">NEGATIVE</td>
+          <td>No ALK gene rearrangement detected</td>
+          <td><span class="method-tag">FISH — Vysis</span></td>
+        </tr>
+        <tr>
+          <td>ROS1 Rearrangement</td>
+          <td class="result-negative">NEGATIVE</td>
+          <td>No ROS1 gene rearrangement detected</td>
+          <td><span class="method-tag">FISH</span></td>
+        </tr>
+        <tr>
+          <td>KRAS</td>
+          <td class="result-negative">NOT DETECTED</td>
+          <td>No KRAS mutations identified</td>
+          <td><span class="method-tag">NGS — Oncomine Dx</span></td>
+        </tr>
+        <tr>
+          <td>BRAF</td>
+          <td class="result-negative">NOT DETECTED</td>
+          <td>No BRAF V600 mutations</td>
+          <td><span class="method-tag">NGS — Oncomine Dx</span></td>
+        </tr>
+        <tr>
+          <td>MET Exon 14</td>
+          <td class="result-negative">NOT DETECTED</td>
+          <td>No MET exon 14 skipping mutation</td>
+          <td><span class="method-tag">NGS — Oncomine Dx</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <hr class="thin">
+
+  <!-- Microscopic Description -->
+  <div class="section">
+    <div class="section-title">Microscopic Description</div>
+    <p class="narrative">
+      Sections of the core biopsy reveal fragments of moderately differentiated adenocarcinoma
+      demonstrating a mixed lepidic and acinar growth pattern. Tumor cells exhibit enlarged,
+      hyperchromatic nuclei with prominent nucleoli and moderate amounts of cytoplasm. Mitotic
+      figures are identified (6 per 10 HPF). No lymphovascular or perineural invasion is
+      identified in the submitted tissue. Background lung parenchyma shows mild emphysematous
+      changes. Immunohistochemical stains show positivity for TTF-1 and Napsin-A, consistent
+      with pulmonary origin. CK7 positive, CK20 negative.
+    </p>
+  </div>
+
+  <!-- Clinical Notes -->
+  <div class="section">
+    <div class="section-title">Clinical Notes</div>
+    <p class="narrative">
+      Patient is a 58-year-old female never-smoker who presented with persistent cough and
+      right-sided chest discomfort. CT chest revealed a 3.2 cm spiculated mass in the right
+      lower lobe with mediastinal lymphadenopathy (stations 4R and 7). PET/CT demonstrated
+      FDG-avid right lower lobe mass (SUVmax 8.4), bilateral mediastinal nodes, contralateral
+      lung nodule (left upper lobe, 8mm), and L3 vertebral body lesion. ECOG performance
+      status 1. Patient completed 4 cycles of first-line Carboplatin/Pemetrexed with
+      partial response, now with radiographic progression. Referred for molecular-guided
+      therapy options including clinical trial evaluation.
+    </p>
+  </div>
+
+  <!-- Signature -->
+  <div class="signature-block">
+    <div class="signature-left">
+      <div class="sig-name">Margaret L. Whitfield, M.D., Ph.D.</div>
+      <div class="sig-title">Attending Pathologist, Molecular Diagnostics<br>Board Certified — Anatomic &amp; Clinical Pathology</div>
+    </div>
+    <div class="signature-right">
+      <div>Electronically signed</div>
+      <div class="sig-date">March 8, 2026 — 14:32 EST</div>
+      <div style="margin-top: 2pt;">Verified by: J. Harmon, MD (cytopathology)</div>
+    </div>
+  </div>
+
+  <!-- Footer -->
+  <div class="footer">
+    <span>Meridian Health System &bull; Pathology Report SP-2026-004817 &bull; Page 1 of 1</span>
+    <span>Generated: 03/08/2026 14:32:07</span>
+  </div>
+
+  <div class="confidential-stamp">Confidential — Protected Health Information</div>
+
+</div>
+
+</body>
+</html>

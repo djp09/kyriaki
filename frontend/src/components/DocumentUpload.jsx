@@ -22,12 +22,14 @@ function docTypeLabel(type) {
   return labels[type] || "Document";
 }
 
-export default function DocumentUpload({ onExtracted, onSkip }) {
+export default function DocumentUpload({ onSubmit, onSkip }) {
   const [dragOver, setDragOver] = useState(false);
   const [file, setFile] = useState(null);
   const [uploading, setUploading] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
+  const [confirmStep, setConfirmStep] = useState(false);
+  const [extras, setExtras] = useState({ location_zip: "", willing_to_travel_miles: "50", age: "", sex: "" });
   const inputRef = useRef(null);
 
   const handleFile = useCallback(async (f) => {
@@ -72,9 +74,41 @@ export default function DocumentUpload({ onExtracted, onSkip }) {
   }, [handleFile]);
 
   const handleUseResults = () => {
-    if (result?.extracted) {
-      onExtracted(result.extracted, result.document_type);
-    }
+    if (!result?.extracted) return;
+    const ext = result.extracted;
+    // Pre-fill extras from extraction if available
+    setExtras((prev) => ({
+      ...prev,
+      age: ext.age != null ? String(ext.age) : prev.age,
+      sex: ext.sex || prev.sex,
+    }));
+    setConfirmStep(true);
+  };
+
+  const handleConfirmSubmit = () => {
+    const ext = result.extracted || {};
+    const age = parseInt(extras.age || ext.age, 10);
+    const sex = extras.sex || ext.sex;
+    const zip = extras.location_zip.trim();
+
+    if (!ext.cancer_type || !age || !sex || !zip) return;
+
+    const payload = {
+      cancer_type: ext.cancer_type,
+      cancer_stage: ext.cancer_stage || "Unknown",
+      biomarkers: ext.biomarkers || [],
+      prior_treatments: ext.prior_treatments || [],
+      lines_of_therapy: ext.lines_of_therapy || 0,
+      age,
+      sex,
+      ecog_score: ext.ecog_score != null ? ext.ecog_score : null,
+      key_labs: ext.key_labs && Object.keys(ext.key_labs).length > 0 ? ext.key_labs : null,
+      location_zip: zip,
+      willing_to_travel_miles: parseInt(extras.willing_to_travel_miles) || 50,
+      additional_conditions: ext.additional_conditions || [],
+      additional_notes: ext.additional_notes || null,
+    };
+    onSubmit(payload);
   };
 
   const handleRetry = () => {
@@ -177,17 +211,64 @@ export default function DocumentUpload({ onExtracted, onSkip }) {
             )}
           </div>
 
-          <div className="doc-actions">
-            <button className="btn btn-primary" onClick={handleUseResults}>
-              Use These Results
-            </button>
-            <button className="btn btn-secondary" onClick={handleRetry}>
-              Upload Different Document
-            </button>
-          </div>
-          <p className="doc-disclaimer">
-            Please review and correct any extracted information before proceeding. AI extraction may not be 100% accurate.
-          </p>
+          {!confirmStep ? (
+            <>
+              <div className="doc-actions">
+                <button className="btn btn-primary" onClick={handleUseResults}>
+                  Use These Results
+                </button>
+                <button className="btn btn-secondary" onClick={handleRetry}>
+                  Upload Different Document
+                </button>
+              </div>
+              <p className="doc-disclaimer">
+                Review the extracted information above. Click "Use These Results" to proceed to matching.
+              </p>
+            </>
+          ) : (
+            <div className="doc-confirm">
+              <h4>Confirm a few details before we search</h4>
+              {!ext.age && (
+                <div className="field">
+                  <label htmlFor="confirm-age">Age</label>
+                  <input id="confirm-age" type="number" min="0" max="120" value={extras.age}
+                    onChange={(e) => setExtras((p) => ({ ...p, age: e.target.value }))} />
+                </div>
+              )}
+              {!ext.sex && (
+                <div className="field">
+                  <label htmlFor="confirm-sex">Sex</label>
+                  <select id="confirm-sex" value={extras.sex}
+                    onChange={(e) => setExtras((p) => ({ ...p, sex: e.target.value }))}>
+                    <option value="">Select...</option>
+                    <option value="male">Male</option>
+                    <option value="female">Female</option>
+                  </select>
+                </div>
+              )}
+              <div className="field">
+                <label htmlFor="confirm-zip">Your ZIP Code</label>
+                <input id="confirm-zip" type="text" maxLength={10} placeholder="e.g., 10001"
+                  value={extras.location_zip}
+                  onChange={(e) => setExtras((p) => ({ ...p, location_zip: e.target.value }))} />
+              </div>
+              <div className="field">
+                <label htmlFor="confirm-travel">Willing to Travel (miles)</label>
+                <input id="confirm-travel" type="number" min="0" value={extras.willing_to_travel_miles}
+                  onChange={(e) => setExtras((p) => ({ ...p, willing_to_travel_miles: e.target.value }))} />
+              </div>
+              <div className="doc-actions">
+                <button className="btn btn-primary"
+                  disabled={!extras.location_zip.trim() || !(extras.age || ext.age) || !(extras.sex || ext.sex)}
+                  onClick={handleConfirmSubmit}>
+                  Find My Trials
+                </button>
+                <button className="btn btn-secondary" onClick={() => setConfirmStep(false)}>
+                  Back
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       </div>
     );

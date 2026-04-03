@@ -257,9 +257,9 @@ export default function App() {
     } catch (err) { setError("Failed to approve enrollment: " + err.message); }
   };
 
-  const handleDocExtracted = (extracted, docType) => {
-    setPrefill(extracted);
-    setView("intake");
+  const handleDocSubmit = async (payload) => {
+    // Document extraction produced a complete payload — go straight to matching
+    await handleSubmit(payload);
   };
 
   const handleDocSkip = () => {
@@ -326,7 +326,7 @@ export default function App() {
 
       <div className={`view-container ${view}`}>
         {view === "upload" && (
-          <DocumentUpload onExtracted={handleDocExtracted} onSkip={handleDocSkip} />
+          <DocumentUpload onSubmit={handleDocSubmit} onSkip={handleDocSkip} />
         )}
 
         {view === "intake" && <IntakeForm onSubmit={handleSubmit} prefill={prefill} />}
