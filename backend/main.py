@@ -124,9 +124,18 @@ async def lifespan(app: FastAPI):
         from database import engine
         from db_models import Base
 
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-        logger.info("db.auto_created_tables", backend="sqlite")
+        # In dev, drop and recreate all tables to pick up schema changes.
+        # This avoids the "no such column" errors when models change.
+        # Production uses alembic migrations against Postgres.
+        if settings.environment == "development":
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.drop_all)
+                await conn.run_sync(Base.metadata.create_all)
+            logger.info("db.dev_tables_recreated", backend="sqlite")
+        else:
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            logger.info("db.auto_created_tables", backend="sqlite")
 
     # Recover any tasks orphaned by a prior process restart
     try:
@@ -137,6 +146,15 @@ async def lifespan(app: FastAPI):
                 logger.info("startup.recovered_stale_tasks", count=recovered)
     except Exception as e:
         logger.warning("startup.recovery_skipped", error=f"{type(e).__name__}: {e}")
+
+    # Startup self-test: verify DB schema is correct by testing a write
+    try:
+        async with async_session() as session:
+            await session.execute(select(AgentTaskDB).limit(1))
+        logger.info("startup.self_test_passed")
+    except Exception as e:
+        logger.error("startup.self_test_failed", error=f"{type(e).__name__}: {e}")
+        raise RuntimeError(f"Startup self-test failed: {e}") from e
 
     monitor_task = None
     if settings.monitor_enabled:
