@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 import agents as _agents  # noqa: F401 — triggers agent registration
 from config import get_settings
 from database import async_session, get_db
-from db_models import AgentEventDB, AgentTaskDB, HumanGateDB, PatientPipelineDB, TaskStatus, TrialWatchDB
+from db_models import AgentEventDB, AgentTaskDB, HumanGateDB, TaskStatus, TrialWatchDB
 from db_service import (
     get_patient_activity,
     get_task_with_gates,
@@ -34,10 +34,8 @@ from dispatcher import (
     dispatch_background,
     get_or_create_pipeline,
     get_trial_watches,
-    has_active_task,
     recover_stale_tasks,
     retry_task,
-    upsert_trial_watches,
 )
 from logging_config import get_logger, setup_logging
 from matching_engine import match_trials

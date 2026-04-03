@@ -46,10 +46,10 @@ async def call_claude_with_retry(
     """Call Claude with exponential backoff on rate limits."""
     for attempt in range(max_retries):
         try:
-            kwargs = dict(model=model, max_tokens=max_tokens, messages=messages)
+            create_kwargs = {"model": model, "max_tokens": max_tokens, "messages": messages}
             if tools:
-                kwargs["tools"] = tools
-            return await client.messages.create(**kwargs)
+                create_kwargs["tools"] = tools
+            return await client.messages.create(**create_kwargs)
         except anthropic.RateLimitError:
             if attempt == max_retries - 1:
                 raise
@@ -91,7 +91,7 @@ async def paced_claude_call(
     """Call Claude with optional inter-call delay for rate-limit pacing."""
     global _last_call_time
     settings = get_settings()
-    call_kwargs = dict(model=model, max_tokens=max_tokens, messages=messages, tools=tools)
+    call_kwargs = {"model": model, "max_tokens": max_tokens, "messages": messages, "tools": tools}
     if settings.inter_call_delay > 0:
         async with _get_call_lock():
             now = time.monotonic()

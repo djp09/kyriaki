@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
-from typing import Any, Optional, Union
+from typing import Any, Union
 
 from config import get_settings
 from logging_config import get_logger

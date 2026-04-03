@@ -22,7 +22,6 @@ from datetime import datetime, timezone
 from typing import Any, Callable, ClassVar
 
 from agent_loop import AgentBudget, AgentDecision, Scratchpad, ToolDefinition, run_agent_loop
-from tools import TokenUsage
 from config import get_settings
 from dispatcher import register_agent
 from logging_config import get_logger

@@ -9,10 +9,9 @@ from unittest.mock import AsyncMock, patch
 import pytest
 import pytest_asyncio
 
-from agent_loop import FINISH_TOOL, Scratchpad, ToolDefinition, _build_tool_use_tools
+from agent_loop import Scratchpad, _build_tool_use_tools
 from agents import MATCHING_TOOLS, AgentContext, DossierAgent, MatchingAgent
-from tools import TokenUsage
-from db_models import AgentEventDB, AgentTaskDB, GateStatus, HumanGateDB, PatientPipelineDB, TaskStatus, TrialWatchDB
+from db_models import AgentEventDB, AgentTaskDB, GateStatus, HumanGateDB, TaskStatus
 from dispatcher import (
     dispatch,
     dispatch_background,
@@ -32,7 +31,7 @@ from models import (
     TaskDetailResponse,
     TaskResponse,
 )
-from tools import ToolResult
+from tools import TokenUsage, ToolResult
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -655,7 +654,6 @@ class TestStaleTaskRecovery:
         )
         db_session.add(task)
         await db_session.flush()
-        task_id = task.id
 
         count = await recover_stale_tasks(db_session)
         assert count >= 1
