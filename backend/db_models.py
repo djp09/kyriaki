@@ -232,6 +232,31 @@ class PatientPipelineDB(Base):
     )
 
 
+# --- Trial cache ---
+
+
+class TrialCacheDB(Base):
+    """Persistent cache for ClinicalTrials.gov search results.
+
+    Survives process restarts unlike the in-memory cache.
+    Refreshed nightly for production, on-demand for dev.
+    """
+
+    __tablename__ = "trial_cache"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    cache_key: Mapped[str] = mapped_column(String(512), nullable=False, unique=True)
+    trials_json: Mapped[dict] = mapped_column(JSON, nullable=False)  # list[dict] stored as JSON
+    trial_count: Mapped[int] = mapped_column(Integer, default=0)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        Index("ix_trial_cache_key", "cache_key", unique=True),
+        Index("ix_trial_cache_expires", "expires_at"),
+    )
+
+
 # --- Ground truth feedback ---
 
 

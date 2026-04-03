@@ -9,7 +9,7 @@ import json
 import re
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -62,6 +62,7 @@ from models import (
 from tools.document_extractor import SUPPORTED_TYPES, extract_from_document
 from tools.ground_truth import compute_outcome_stats, get_outcomes_for_patient, upsert_outcome
 from tools.pdf_renderer import render_dossier_pdf
+from trial_refresh import get_cache_stats, refresh_all
 from trials_client import close_http_client, get_trial
 
 settings = get_settings()
@@ -93,6 +94,27 @@ async def _monitor_loop() -> None:
             logger.error("monitor.loop_error", error=f"{type(e).__name__}: {e}")
 
 
+async def _trial_refresh_loop() -> None:
+    """Background loop: refreshes trial cache nightly at the configured hour (UTC)."""
+    while True:
+        # Calculate seconds until next refresh hour
+        now = datetime.now(timezone.utc)
+        target = now.replace(hour=settings.trial_refresh_hour, minute=0, second=0, microsecond=0)
+        if target <= now:
+            target += timedelta(days=1)
+        wait_seconds = (target - now).total_seconds()
+        logger.info("refresh.next_run", wait_seconds=int(wait_seconds), target=target.isoformat())
+        await asyncio.sleep(wait_seconds)
+
+        try:
+            async with async_session() as session:
+                summary = await refresh_all(session)
+                await session.commit()
+            logger.info("refresh.nightly_complete", **summary)
+        except Exception as e:
+            logger.error("refresh.nightly_error", error=f"{type(e).__name__}: {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Auto-create tables in dev mode (SQLite). Production uses alembic."""
@@ -119,10 +141,17 @@ async def lifespan(app: FastAPI):
         monitor_task = asyncio.create_task(_monitor_loop())
         logger.info("monitor.started", interval=settings.monitor_interval_seconds)
 
+    refresh_task = None
+    if settings.trial_refresh_enabled:
+        refresh_task = asyncio.create_task(_trial_refresh_loop())
+        logger.info("refresh.started", hour_utc=settings.trial_refresh_hour)
+
     yield
 
     if monitor_task:
         monitor_task.cancel()
+    if refresh_task:
+        refresh_task.cancel()
     await close_http_client()
 
 
@@ -716,3 +745,18 @@ async def record_outcome(patient_id: str, nct_id: str, update: OutcomeUpdate, db
     if not outcome:
         raise HTTPException(500, "Failed to retrieve recorded outcome")
     return OutcomeResponse(**outcome)
+
+
+# --- Trial cache admin endpoints ---
+
+
+@app.post("/api/admin/refresh-trials")
+async def trigger_trial_refresh(db: AsyncSession = Depends(get_db)):
+    """Manually trigger a full trial cache refresh."""
+    return await refresh_all(db)
+
+
+@app.get("/api/admin/trial-cache/stats")
+async def trial_cache_stats(db: AsyncSession = Depends(get_db)):
+    """Get trial cache statistics."""
+    return await get_cache_stats(db)

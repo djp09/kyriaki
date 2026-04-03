@@ -57,7 +57,10 @@ class Settings(BaseSettings):
     auto_chain_matching_to_dossier: bool = False  # If True, auto-dispatch dossier after matching completes
 
     # Trials client
-    cache_ttl: int = 300
+    cache_ttl: int = 300  # In-memory cache TTL (seconds)
+    trial_cache_ttl_hours: int = 24  # DB cache TTL for nightly refresh
+    trial_refresh_enabled: bool = False  # Enable nightly background refresh
+    trial_refresh_hour: int = 2  # Hour (UTC) to run nightly refresh
 
     # Server
     cors_origins: list[str] = ["http://localhost:5173", "http://localhost:3000"]
