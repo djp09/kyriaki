@@ -5,6 +5,7 @@ httpx==0.28.1
 anthropic==0.43.0
 pydantic==2.10.4
 python-dotenv==1.0.1
+python-multipart>=0.0.18
 eval-type-backport>=0.2.0  # Python 3.9 compat for PEP 604 type syntax in Pydantic
 # Database
 sqlalchemy[asyncio]>=2.0.36

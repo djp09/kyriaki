@@ -197,6 +197,16 @@ class OutcomeResponse(BaseModel):
     updated_at: str
 
 
+class DocumentExtractionResponse(BaseModel):
+    """Response from document upload + AI extraction."""
+
+    document_type: str
+    confidence: float = Field(ge=0.0, le=1.0)
+    extracted: dict  # Partial PatientProfile fields
+    extraction_notes: str = ""
+    token_usage: dict | None = None
+
+
 class OutcomeStats(BaseModel):
     total_outcomes: int
     by_navigator_decision: dict  # {"approved": 5, "rejected": 2}

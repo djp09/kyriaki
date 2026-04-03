@@ -11,7 +11,7 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import ValidationError
@@ -42,6 +42,7 @@ from matching_engine import match_trials
 from middleware import RequestLoggingMiddleware
 from models import (
     ActivityItem,
+    DocumentExtractionResponse,
     DossierRequest,
     EnrollmentRequest,
     EventResponse,
@@ -58,6 +59,7 @@ from models import (
     TaskDetailResponse,
     TaskResponse,
 )
+from tools.document_extractor import SUPPORTED_TYPES, extract_from_document
 from tools.ground_truth import compute_outcome_stats, get_outcomes_for_patient, upsert_outcome
 from tools.pdf_renderer import render_dossier_pdf
 from trials_client import close_http_client, get_trial
@@ -183,6 +185,44 @@ async def match(request: MatchRequest):
     except Exception as e:
         logger.error("match.pipeline_error", exc_type=type(e).__name__, error=str(e), exc_info=True)
         return _error_response(500, "We encountered an error while matching trials. Please try again.")
+
+
+@app.post("/api/upload/document", response_model=DocumentExtractionResponse)
+async def upload_document(file: UploadFile):
+    """Upload a medical document (PDF, image) and extract structured patient data.
+
+    Supports pathology reports, treatment summaries, lab results.
+    Returns extracted fields that can pre-fill the intake form.
+    """
+    content_type = file.content_type or "application/octet-stream"
+    if content_type not in SUPPORTED_TYPES:
+        raise HTTPException(
+            400,
+            f"Unsupported file type: {content_type}. Supported: PDF, PNG, JPG, GIF, WEBP",
+        )
+
+    file_bytes = await file.read()
+    if len(file_bytes) == 0:
+        raise HTTPException(400, "Empty file")
+
+    result = await extract_from_document(file_bytes, content_type, file.filename or "upload")
+    if not result.success:
+        raise HTTPException(422, result.error)
+
+    data = result.data
+    return DocumentExtractionResponse(
+        document_type=data.get("document_type", "unknown"),
+        confidence=data.get("confidence", 0.0),
+        extracted=data.get("extracted", {}),
+        extraction_notes=data.get("extraction_notes", ""),
+        token_usage={
+            "input_tokens": result.token_usage.input_tokens,
+            "output_tokens": result.token_usage.output_tokens,
+            "total_tokens": result.token_usage.total_tokens,
+        }
+        if result.token_usage
+        else None,
+    )
 
 
 _NCT_RE = re.compile(r"^NCT\d{2,11}$")
