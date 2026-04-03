@@ -310,7 +310,7 @@ export default function DocumentUpload({ onSubmit, onSkip }) {
               <div className="spinner-ring spinner-ring-2" />
             </div>
             <p>Analyzing {file?.name}...</p>
-            <p className="doc-upload-hint">This typically takes 5-10 seconds</p>
+            <p className="doc-upload-hint">This typically takes 15-30 seconds for PDFs</p>
           </div>
         ) : (
           <div className="doc-idle">

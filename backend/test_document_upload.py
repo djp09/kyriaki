@@ -111,7 +111,7 @@ class TestExtraction:
         ]
         mock_response.usage = MagicMock(input_tokens=500, output_tokens=200)
 
-        with patch("tools.document_extractor.paced_claude_call", AsyncMock(return_value=mock_response)):
+        with patch("tools.document_extractor.call_claude_with_retry", AsyncMock(return_value=mock_response)):
             result = await extract_from_document(b"fake-pdf", "application/pdf", "report.pdf")
 
         assert result.success
@@ -140,7 +140,7 @@ class TestExtraction:
         mock_response.content = [MagicMock(text="This is not JSON at all")]
         mock_response.usage = MagicMock(input_tokens=100, output_tokens=50)
 
-        with patch("tools.document_extractor.paced_claude_call", AsyncMock(return_value=mock_response)):
+        with patch("tools.document_extractor.call_claude_with_retry", AsyncMock(return_value=mock_response)):
             result = await extract_from_document(b"fake", "image/png", "scan.png")
 
         assert not result.success
@@ -154,7 +154,7 @@ class TestExtraction:
         ]
         mock_response.usage = MagicMock(input_tokens=100, output_tokens=50)
 
-        with patch("tools.document_extractor.paced_claude_call", AsyncMock(return_value=mock_response)):
+        with patch("tools.document_extractor.call_claude_with_retry", AsyncMock(return_value=mock_response)):
             result = await extract_from_document(b"fake", "image/png", "blank.png")
 
         assert not result.success
@@ -163,7 +163,7 @@ class TestExtraction:
     @pytest.mark.asyncio
     async def test_extract_api_error(self):
         with patch(
-            "tools.document_extractor.paced_claude_call",
+            "tools.document_extractor.call_claude_with_retry",
             AsyncMock(side_effect=RuntimeError("API unavailable")),
         ):
             result = await extract_from_document(b"fake", "application/pdf", "report.pdf")
@@ -223,7 +223,7 @@ class TestUploadEndpoint:
         ]
         mock_response.usage = MagicMock(input_tokens=300, output_tokens=100)
 
-        with patch("tools.document_extractor.paced_claude_call", AsyncMock(return_value=mock_response)):
+        with patch("tools.document_extractor.call_claude_with_retry", AsyncMock(return_value=mock_response)):
             resp = client.post(
                 "/api/upload/document",
                 files={"file": ("labs.pdf", b"fake-pdf-content", "application/pdf")},

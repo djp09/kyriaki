@@ -13,7 +13,7 @@ from typing import Any
 from config import get_settings
 from logging_config import get_logger
 from tools import ToolResult, ToolSpec, register_tool
-from tools.claude_api import _extract_token_usage, get_claude_client, paced_claude_call, parse_json_response
+from tools.claude_api import _extract_token_usage, call_claude_with_retry, get_claude_client, parse_json_response
 
 logger = get_logger("kyriaki.tools.document_extractor")
 
@@ -140,7 +140,10 @@ async def extract_from_document(
     )
 
     try:
-        response = await paced_claude_call(
+        # Bypass the adaptive concurrency limiter — this is a user-facing
+        # upload, not a batch analysis call. The limiter is shared with the
+        # matching agent and can block uploads when agents are running.
+        response = await call_claude_with_retry(
             get_claude_client(),
             model=settings.claude_model,
             max_tokens=2000,
