@@ -291,12 +291,21 @@ class MatchingAgent(BaseAgent):
         # Moderate/complex patients: adaptive agent loop with planning
         if route.complexity == "simple":
             pool, analyses = await self._run_direct_pipeline(
-                patient, settings, biomarker_context, ctx.emit,
+                patient,
+                settings,
+                biomarker_context,
+                ctx.emit,
             )
         else:
             pool, analyses = await self._run_agent_loop_pipeline(
-                patient, max_results, settings, route, patient_vars,
-                biomarker_context, drug_map, ctx.emit,
+                patient,
+                max_results,
+                settings,
+                route,
+                patient_vars,
+                biomarker_context,
+                drug_map,
+                ctx.emit,
             )
 
         # Build final result
@@ -446,7 +455,12 @@ class MatchingAgent(BaseAgent):
         else:
             rankings = prescreen_result.data.get("rankings", [])
             high_tier_ids = [r["nct_id"] for r in rankings if r.get("tier") == "HIGH"]
-            logger.info("matching.prescreen", total=len(rankings), high=len(high_tier_ids), low=len(rankings) - len(high_tier_ids))
+            logger.info(
+                "matching.prescreen",
+                total=len(rankings),
+                high=len(high_tier_ids),
+                low=len(rankings) - len(high_tier_ids),
+            )
 
             for r in rankings:
                 if r.get("tier") == "LOW" and r["nct_id"] not in analyses:
@@ -817,9 +831,7 @@ class MatchingAgent(BaseAgent):
                 return None
         return None
 
-    def _build_final_matches_from(
-        self, pool: dict, analyses: dict, patient: PatientProfile, max_results: int
-    ):
+    def _build_final_matches_from(self, pool: dict, analyses: dict, patient: PatientProfile, max_results: int):
         """Build ranked TrialMatch list from pool and analyses dicts."""
         from models import TrialMatch
 
