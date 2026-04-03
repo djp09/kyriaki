@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
+import DocumentUpload from "./components/DocumentUpload";
 import IntakeForm from "./components/IntakeForm";
 import TrialResults from "./components/TrialResults";
 import TrialDetail from "./components/TrialDetail";
@@ -37,11 +38,12 @@ const DISCLAIMER =
   "Please discuss all findings with your oncologist before making any treatment decisions.";
 
 export default function App() {
-  const [view, setView] = useState("intake");
+  const [view, setView] = useState("upload");
   const [results, setResults] = useState(null);
   const [selectedTrial, setSelectedTrial] = useState(null);
   const [error, setError] = useState(null);
   const [fallbackMsgIndex, setFallbackMsgIndex] = useState(0);
+  const [prefill, setPrefill] = useState(null);
 
   // Task tracking
   const [matchTaskId, setMatchTaskId] = useState(null);
@@ -226,17 +228,27 @@ export default function App() {
     } catch (err) { setError("Failed to approve enrollment: " + err.message); }
   };
 
+  const handleDocExtracted = (extracted, docType) => {
+    setPrefill(extracted);
+    setView("intake");
+  };
+
+  const handleDocSkip = () => {
+    setPrefill(null);
+    setView("intake");
+  };
+
   const handleRetry = useCallback(() => setError(null), []);
   const handleSelectTrial = (trial) => { setSelectedTrial(trial); setView("detail"); };
   const handleBackToResults = () => { setSelectedTrial(null); setView("results"); };
 
   const handleStartOver = () => {
-    setResults(null); setSelectedTrial(null); setError(null);
+    setResults(null); setSelectedTrial(null); setError(null); setPrefill(null);
     setDossierStatus(null); setDossierData(null); setMatchTaskId(null); setDossierTaskId(null);
     setGateId(null); setApprovalStatus(null);
     setEnrollmentStatus(null); setEnrollmentData(null); setEnrollmentGateId(null); setEnrollmentTaskId(null);
     setOutreachStatus(null); setOutreachData(null); setOutreachTaskId(null);
-    setView("intake");
+    setView("upload");
   };
 
   // Active agent for loading indicator
@@ -285,7 +297,11 @@ export default function App() {
       )}
 
       <div className={`view-container ${view}`}>
-        {view === "intake" && <IntakeForm onSubmit={handleSubmit} />}
+        {view === "upload" && (
+          <DocumentUpload onExtracted={handleDocExtracted} onSkip={handleDocSkip} />
+        )}
+
+        {view === "intake" && <IntakeForm onSubmit={handleSubmit} prefill={prefill} />}
 
         {view === "loading" && (
           <div className="loading" role="status" aria-live="polite">

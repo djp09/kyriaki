@@ -123,3 +123,33 @@ export async function getTaskEvents(taskId) {
 export async function listGates(status = "pending") {
   return request(`${BASE}/agents/gates?status=${encodeURIComponent(status)}`);
 }
+
+// --- Document upload ---
+
+export async function uploadDocument(file) {
+  const formData = new FormData();
+  formData.append("file", file);
+
+  let res;
+  try {
+    res = await fetch(`${BASE}/upload/document`, {
+      method: "POST",
+      body: formData,
+    });
+  } catch (err) {
+    throw new Error("Could not connect to the server. Please try again.");
+  }
+
+  if (!res.ok) {
+    let detail;
+    try {
+      const body = await res.json();
+      detail = body.detail || body.message;
+    } catch {
+      // not JSON
+    }
+    throw new Error(detail || `Upload failed (${res.status}).`);
+  }
+
+  return res.json();
+}

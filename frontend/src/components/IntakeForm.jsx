@@ -81,13 +81,44 @@ function validate(form, step) {
   return errors;
 }
 
-export default function IntakeForm({ onSubmit }) {
+export default function IntakeForm({ onSubmit, prefill }) {
   const [step, setStep] = useState(0);
   const [form, setForm] = useState(INITIAL);
   const [errors, setErrors] = useState({});
   const [touched, setTouched] = useState({});
   const [direction, setDirection] = useState(1); // 1 = forward, -1 = backward
+  const [prefillApplied, setPrefillApplied] = useState(false);
   const stepRef = useRef(null);
+
+  // Apply prefill from document extraction (once)
+  useEffect(() => {
+    if (!prefill || prefillApplied) return;
+    const next = { ...INITIAL };
+    if (prefill.cancer_type) next.cancer_type = prefill.cancer_type;
+    if (prefill.cancer_stage) next.cancer_stage = prefill.cancer_stage;
+    if (Array.isArray(prefill.biomarkers) && prefill.biomarkers.length > 0) {
+      next.biomarkers = prefill.biomarkers.join(", ");
+    }
+    if (Array.isArray(prefill.prior_treatments) && prefill.prior_treatments.length > 0) {
+      next.prior_treatments = prefill.prior_treatments.join(", ");
+    }
+    if (prefill.lines_of_therapy != null) next.lines_of_therapy = prefill.lines_of_therapy;
+    if (prefill.age != null) next.age = String(prefill.age);
+    if (prefill.sex) next.sex = prefill.sex;
+    if (prefill.ecog_score != null) next.ecog_score = String(prefill.ecog_score);
+    if (prefill.key_labs) {
+      if (prefill.key_labs.wbc) next.key_labs_wbc = String(prefill.key_labs.wbc);
+      if (prefill.key_labs.platelets) next.key_labs_platelets = String(prefill.key_labs.platelets);
+      if (prefill.key_labs.hemoglobin) next.key_labs_hemoglobin = String(prefill.key_labs.hemoglobin);
+      if (prefill.key_labs.creatinine) next.key_labs_creatinine = String(prefill.key_labs.creatinine);
+    }
+    if (Array.isArray(prefill.additional_conditions) && prefill.additional_conditions.length > 0) {
+      next.additional_conditions = prefill.additional_conditions.join(", ");
+    }
+    if (prefill.additional_notes) next.additional_notes = prefill.additional_notes;
+    setForm(next);
+    setPrefillApplied(true);
+  }, [prefill, prefillApplied]);
 
   const steps = [
     { title: "Cancer Information", description: "Tell us about your diagnosis.", fields: ["cancer_type", "cancer_stage", "biomarkers"] },
