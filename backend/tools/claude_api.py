@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-import time
 
 import anthropic
 
@@ -68,16 +67,86 @@ async def call_claude_with_retry(
     raise RuntimeError("Exhausted retries without success or exception")
 
 
-_last_call_time: float = 0.0
-_call_lock: asyncio.Lock | None = None
+class AdaptiveConcurrencyLimiter:
+    """Dynamically adjusts concurrency based on rate-limit feedback.
+
+    Starts at max_concurrent, backs off on 429s, ramps up on sustained success.
+    """
+
+    def __init__(self, max_concurrent: int = 10, min_concurrent: int = 1):
+        self._max = max_concurrent
+        self._min = min_concurrent
+        self._current = max_concurrent
+        self._semaphore: asyncio.Semaphore | None = None
+        self._lock: asyncio.Lock | None = None
+        self._consecutive_success = 0
+        self._ramp_up_threshold = 5  # successful calls before increasing concurrency
+        self._last_call_time: float = 0.0
+
+    def _get_lock(self) -> asyncio.Lock:
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        return self._lock
+
+    def _get_semaphore(self) -> asyncio.Semaphore:
+        if self._semaphore is None:
+            self._semaphore = asyncio.Semaphore(self._current)
+        return self._semaphore
+
+    async def on_rate_limit(self) -> None:
+        """Called when a 429 is received. Reduces concurrency."""
+        async with self._get_lock():
+            old = self._current
+            self._current = max(self._min, self._current // 2)
+            self._consecutive_success = 0
+            if old != self._current:
+                # Recreate semaphore with lower limit
+                self._semaphore = asyncio.Semaphore(self._current)
+                logger.info(
+                    "adaptive.backoff",
+                    old_concurrent=old,
+                    new_concurrent=self._current,
+                )
+
+    async def on_success(self) -> None:
+        """Called on a successful call. May ramp up concurrency."""
+        async with self._get_lock():
+            self._consecutive_success += 1
+            if self._consecutive_success >= self._ramp_up_threshold and self._current < self._max:
+                old = self._current
+                self._current = min(self._max, self._current + 1)
+                self._consecutive_success = 0
+                self._semaphore = asyncio.Semaphore(self._current)
+                logger.info(
+                    "adaptive.ramp_up",
+                    old_concurrent=old,
+                    new_concurrent=self._current,
+                )
+
+    @property
+    def current_concurrency(self) -> int:
+        return self._current
+
+    async def acquire(self) -> None:
+        await self._get_semaphore().acquire()
+
+    def release(self) -> None:
+        self._get_semaphore().release()
 
 
-def _get_call_lock() -> asyncio.Lock:
-    """Lazily create the lock on the running event loop (Python 3.9 compat)."""
-    global _call_lock
-    if _call_lock is None:
-        _call_lock = asyncio.Lock()
-    return _call_lock
+# Module-level limiter
+_limiter: AdaptiveConcurrencyLimiter | None = None
+
+
+def get_limiter() -> AdaptiveConcurrencyLimiter:
+    """Get or create the global adaptive concurrency limiter."""
+    global _limiter
+    if _limiter is None:
+        settings = get_settings()
+        _limiter = AdaptiveConcurrencyLimiter(
+            max_concurrent=settings.max_concurrent_analyses,
+        )
+    return _limiter
 
 
 async def paced_claude_call(
@@ -88,20 +157,29 @@ async def paced_claude_call(
     messages: list,
     tools: list | None = None,
 ) -> anthropic.types.Message:
-    """Call Claude with optional inter-call delay for rate-limit pacing."""
-    global _last_call_time
-    settings = get_settings()
-    call_kwargs = {"model": model, "max_tokens": max_tokens, "messages": messages, "tools": tools}
-    if settings.inter_call_delay > 0:
-        async with _get_call_lock():
-            now = time.monotonic()
-            elapsed = now - _last_call_time
-            if elapsed < settings.inter_call_delay:
-                await asyncio.sleep(settings.inter_call_delay - elapsed)
-            result = await call_claude_with_retry(client, **call_kwargs)
-            _last_call_time = time.monotonic()
-            return result
-    return await call_claude_with_retry(client, **call_kwargs)
+    """Call Claude with adaptive concurrency limiting.
+
+    Automatically backs off on rate limits and ramps up on sustained success.
+    """
+    limiter = get_limiter()
+    await limiter.acquire()
+    try:
+        result = await call_claude_with_retry(
+            client,
+            model=model,
+            max_tokens=max_tokens,
+            messages=messages,
+            tools=tools,
+        )
+        await limiter.on_success()
+        return result
+    except (anthropic.RateLimitError, anthropic.APIStatusError) as e:
+        if isinstance(e, anthropic.APIStatusError) and e.status_code != 429:
+            raise
+        await limiter.on_rate_limit()
+        raise
+    finally:
+        limiter.release()
 
 
 # --- JSON parsing ---

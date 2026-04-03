@@ -403,12 +403,11 @@ class MatchingAgent(BaseAgent):
             return "Analysis budget exhausted", False
 
         biomarker_context = scratchpad.state.get("biomarker_context", "")
-        semaphore = asyncio.Semaphore(settings.max_concurrent_analyses)
 
         async def analyze_one(trial: dict) -> tuple[str, dict | None]:
-            async with semaphore:
-                result = await self._analyze_single_trial(patient, trial, settings, biomarker_context)
-                return trial["nct_id"], result
+            # Concurrency is managed by AdaptiveConcurrencyLimiter in paced_claude_call
+            result = await self._analyze_single_trial(patient, trial, settings, biomarker_context)
+            return trial["nct_id"], result
 
         results = await asyncio.gather(*[analyze_one(t) for t in to_analyze])
         budget.analysis_calls_used += len(to_analyze)

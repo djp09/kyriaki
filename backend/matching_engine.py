@@ -147,11 +147,10 @@ async def match_trials(patient: PatientProfile, max_results: int = 10) -> dict:
     total = len(trials)
     logger.info("match.search_complete", candidate_trials=total)
 
-    semaphore = asyncio.Semaphore(settings.max_concurrent_analyses)
+    # Concurrency is managed by AdaptiveConcurrencyLimiter in paced_claude_call
 
     async def analyze_with_limit(trial: dict, index: int):
-        async with semaphore:
-            return trial, await _analyze_trial(patient, trial, index, total)
+        return trial, await _analyze_trial(patient, trial, index, total)
 
     summary_task = asyncio.create_task(_generate_patient_summary(patient))
     analysis_tasks = [analyze_with_limit(trial, i + 1) for i, trial in enumerate(trials)]

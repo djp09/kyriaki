@@ -544,3 +544,72 @@ class TestGeneratePatientSummary:
         assert "62" in result
         assert "Non-Small Cell Lung Cancer" in result
         assert "Carboplatin/Pemetrexed" in result
+
+
+# ---------------------------------------------------------------------------
+# Adaptive concurrency limiter tests
+# ---------------------------------------------------------------------------
+
+
+class TestAdaptiveConcurrencyLimiter:
+    @pytest.mark.asyncio
+    async def test_initial_concurrency(self):
+        from tools.claude_api import AdaptiveConcurrencyLimiter
+
+        limiter = AdaptiveConcurrencyLimiter(max_concurrent=5)
+        assert limiter.current_concurrency == 5
+
+    @pytest.mark.asyncio
+    async def test_backoff_on_rate_limit(self):
+        from tools.claude_api import AdaptiveConcurrencyLimiter
+
+        limiter = AdaptiveConcurrencyLimiter(max_concurrent=8, min_concurrent=1)
+        assert limiter.current_concurrency == 8
+
+        await limiter.on_rate_limit()
+        assert limiter.current_concurrency == 4
+
+        await limiter.on_rate_limit()
+        assert limiter.current_concurrency == 2
+
+        await limiter.on_rate_limit()
+        assert limiter.current_concurrency == 1
+
+        # Should not go below min
+        await limiter.on_rate_limit()
+        assert limiter.current_concurrency == 1
+
+    @pytest.mark.asyncio
+    async def test_ramp_up_on_success(self):
+        from tools.claude_api import AdaptiveConcurrencyLimiter
+
+        limiter = AdaptiveConcurrencyLimiter(max_concurrent=10, min_concurrent=1)
+        # Back off first
+        await limiter.on_rate_limit()
+        low = limiter.current_concurrency
+
+        # Success calls should ramp up
+        for _ in range(limiter._ramp_up_threshold):
+            await limiter.on_success()
+        assert limiter.current_concurrency == low + 1
+
+    @pytest.mark.asyncio
+    async def test_does_not_exceed_max(self):
+        from tools.claude_api import AdaptiveConcurrencyLimiter
+
+        limiter = AdaptiveConcurrencyLimiter(max_concurrent=3)
+        # Already at max — success shouldn't increase
+        for _ in range(20):
+            await limiter.on_success()
+        assert limiter.current_concurrency == 3
+
+    @pytest.mark.asyncio
+    async def test_acquire_release(self):
+        from tools.claude_api import AdaptiveConcurrencyLimiter
+
+        limiter = AdaptiveConcurrencyLimiter(max_concurrent=2)
+        await limiter.acquire()
+        await limiter.acquire()
+        limiter.release()
+        limiter.release()
+        # Should not deadlock — if we get here, it works
