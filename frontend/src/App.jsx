@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import DocumentUpload from "./components/DocumentUpload";
 import IntakeForm from "./components/IntakeForm";
 import TrialResults from "./components/TrialResults";
@@ -80,7 +80,7 @@ export default function App() {
     if (!matchPoller.isComplete || !matchPoller.task) return;
     if (matchPoller.isError) {
       setError(matchPoller.task?.error || "Matching failed.");
-      setView("intake");
+      setView(previousView.current);
       setMatchTaskId(null);
       return;
     }
@@ -95,7 +95,7 @@ export default function App() {
       });
       setView("results");
       setMatchTaskId(null);
-    }).catch((err) => { setError(err.message); setView("intake"); setMatchTaskId(null); });
+    }).catch((err) => { setError(err?.message || String(err)); setView(previousView.current); setMatchTaskId(null); });
   }, [matchPoller.isComplete, matchPoller.isError, matchPoller.task, matchTaskId]);
 
   // Per-trial dossier polling
@@ -171,7 +171,10 @@ export default function App() {
 
   // --- Handlers ---
 
+  const previousView = useRef("intake");
+
   const handleSubmit = async (patient) => {
+    previousView.current = view === "upload" ? "upload" : "intake";
     setView("loading");
     setError(null);
     setTrialPipelines({});
@@ -185,7 +188,11 @@ export default function App() {
       } else {
         setMatchTaskId(task.task_id);
       }
-    } catch (err) { setError(err.message); setView("intake"); }
+    } catch (err) {
+      const msg = err?.message || String(err);
+      setError(msg);
+      setView(previousView.current);
+    }
   };
 
   const handleAnalyzeTrial = async (nctId) => {

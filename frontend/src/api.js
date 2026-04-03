@@ -17,7 +17,9 @@ async function request(url, options) {
     let detail;
     try {
       const body = await res.json();
-      detail = body.detail;
+      detail = body.detail || body.message;
+      // Ensure detail is a string
+      if (detail && typeof detail !== "string") detail = JSON.stringify(detail);
     } catch {
       // response wasn't JSON
     }
