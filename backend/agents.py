@@ -41,6 +41,7 @@ from prompts import (
     OUTREACH_ORCHESTRATOR_PROMPT,
 )
 from routing import classify_patient
+from tools.biomarker_lookup import enrich_biomarkers_tool
 from tools.claude_api import (
     claude_json_call,
     claude_text_call,
@@ -57,8 +58,9 @@ from tools.data_formatter import (
     extract_contacts,
     format_patient_for_prompt,
 )
+from tools.drug_normalization import normalize_drug_list_tool
 from tools.prompt_renderer import render_prompt
-from tools.trial_search import fetch_trial_tool, search_trials_tool
+from tools.trial_search import fetch_trial_tool, search_and_merge_tool
 
 logger = get_logger("kyriaki.agents")
 
@@ -265,11 +267,28 @@ class MatchingAgent(BaseAgent):
         route = classify_patient(patient)
         budget = route.to_budget()
 
-        # Patient summary runs concurrently with the agent loop
+        # Run enrichments concurrently: patient summary, biomarker lookup, drug normalization
         summary_task = asyncio.create_task(self._generate_summary(patient))
+        biomarker_task = asyncio.create_task(self._enrich_biomarkers(patient))
+        drug_task = asyncio.create_task(self._normalize_drugs(patient))
+
+        # Await enrichments (these feed into prompts)
+        biomarker_context, drug_map = await asyncio.gather(biomarker_task, drug_task)
 
         # Build prompt variables from patient profile
         patient_vars = format_patient_for_prompt(patient)
+
+        # Inject normalized drug names into patient vars
+        if drug_map:
+            normalized_treatments = []
+            for t in patient.prior_treatments:
+                norm = drug_map.get(t)
+                if norm and norm["canonical"] != t:
+                    normalized_treatments.append(f"{norm['canonical']} (reported as: {t})")
+                else:
+                    normalized_treatments.append(t)
+            patient_vars["prior_treatments"] = ", ".join(normalized_treatments) or "None"
+
         prompt_vars = {
             **patient_vars,
             "location_zip": patient.location_zip,
@@ -286,6 +305,8 @@ class MatchingAgent(BaseAgent):
                 "analyses": {},  # nct_id → analysis dict
                 "settings": settings,
                 "route": route,
+                "biomarker_context": biomarker_context,  # CIViC enrichment for prompts
+                "drug_map": drug_map,  # RxNorm normalized drug names
             }
         )
 
@@ -336,13 +357,14 @@ class MatchingAgent(BaseAgent):
 
         patient = scratchpad.state["patient"]
         params = decision.params
-        result = await search_trials_tool(
+        result = await search_and_merge_tool(
             cancer_type=params.get("query_cond", patient.cancer_type),
             age=patient.age,
             sex=patient.sex,
             page_size=params.get("page_size", 20),
             query_intr=params.get("query_intr"),
             query_term=params.get("query_term"),
+            include_nci=True,
         )
         budget.search_calls_used += 1
 
@@ -380,11 +402,12 @@ class MatchingAgent(BaseAgent):
         if not to_analyze:
             return "Analysis budget exhausted", False
 
+        biomarker_context = scratchpad.state.get("biomarker_context", "")
         semaphore = asyncio.Semaphore(settings.max_concurrent_analyses)
 
         async def analyze_one(trial: dict) -> tuple[str, dict | None]:
             async with semaphore:
-                result = await self._analyze_single_trial(patient, trial, settings)
+                result = await self._analyze_single_trial(patient, trial, settings, biomarker_context)
                 return trial["nct_id"], result
 
         results = await asyncio.gather(*[analyze_one(t) for t in to_analyze])
@@ -456,14 +479,20 @@ class MatchingAgent(BaseAgent):
 
         return f"Evaluated {len(borderline)} borderline scores, adjusted {adjusted_count}", True
 
-    async def _analyze_single_trial(self, patient: PatientProfile, trial: dict, settings) -> dict | None:
-        """Analyze a single trial's eligibility — same logic as before."""
+    async def _analyze_single_trial(
+        self, patient: PatientProfile, trial: dict, settings, biomarker_context: str = ""
+    ) -> dict | None:
+        """Analyze a single trial's eligibility with enriched biomarker data."""
         nct_id = trial["nct_id"]
         eligibility_text = trial["eligibility_criteria"]
         if len(eligibility_text) > 6000:
             eligibility_text = (
                 eligibility_text[:6000] + "\n\n[Eligibility text truncated — focus on the criteria above]"
             )
+
+        # Append CIViC biomarker context to eligibility text if available
+        if biomarker_context:
+            eligibility_text = eligibility_text + "\n\n" + biomarker_context
 
         patient_vars = format_patient_for_prompt(patient)
         prompt_result = render_prompt(
@@ -526,6 +555,32 @@ class MatchingAgent(BaseAgent):
 
         matches.sort(key=lambda m: m.match_score, reverse=True)
         return matches[:max_results]
+
+    async def _enrich_biomarkers(self, patient: PatientProfile) -> str:
+        """Look up CIViC evidence for patient biomarkers. Returns context block for prompts."""
+        if not patient.biomarkers:
+            return ""
+        try:
+            result = await enrich_biomarkers_tool(
+                biomarkers=patient.biomarkers, cancer_type=patient.cancer_type
+            )
+            if result.success:
+                return result.data.get("context_block", "")
+        except Exception as e:
+            logger.warning("matching.biomarker_enrichment_failed", error=str(e))
+        return ""
+
+    async def _normalize_drugs(self, patient: PatientProfile) -> dict:
+        """Normalize patient's prior treatment names via RxNorm. Returns name→info map."""
+        if not patient.prior_treatments:
+            return {}
+        try:
+            result = await normalize_drug_list_tool(names=patient.prior_treatments)
+            if result.success:
+                return result.data.get("normalized", {})
+        except Exception as e:
+            logger.warning("matching.drug_normalization_failed", error=str(e))
+        return {}
 
     async def _generate_summary(self, patient: PatientProfile) -> str:
         """Generate patient summary (runs concurrently with agent loop)."""

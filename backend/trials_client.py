@@ -270,6 +270,85 @@ async def search_trials(
     return studies
 
 
+async def search_nci_trials(
+    cancer_type: str,
+    age: int | None = None,
+    sex: str | None = None,
+    page_size: int = 10,
+) -> list[dict]:
+    """Search for NCI-sponsored oncology trials.
+
+    NCI trials are a curated subset of ClinicalTrials.gov with higher
+    signal-to-noise for cancer specifically. Queries ClinicalTrials.gov
+    with NCI-specific filters (LEAD_ORG = National Cancer Institute).
+    """
+    cache_k = _cache_key(f"NCI:{cancer_type}", age, sex, page_size)
+    cached = _get_cached(cache_k)
+    if cached is not None:
+        return cached
+
+    params = {
+        "query.cond": cancer_type,
+        "query.term": "AREA[LeadSponsorName]National Cancer Institute",
+        "filter.overallStatus": "RECRUITING",
+        "fields": FIELDS,
+        "pageSize": min(page_size, 100),
+    }
+
+    try:
+        resp = await _http_get_with_retry(f"{BASE_URL}/studies", params)
+    except Exception as e:
+        logger.warning("trials.nci_search_failed", error=str(e))
+        return []
+
+    try:
+        data = resp.json()
+    except Exception as e:
+        logger.error("trials.nci_json_parse_failed", error=str(e))
+        return []
+
+    if not isinstance(data, dict) or "studies" not in data:
+        return []
+
+    studies = []
+    for study_raw in data.get("studies", []):
+        try:
+            study = _extract_study(study_raw)
+        except Exception:
+            continue
+
+        if age is not None:
+            min_age = _parse_age_years(study.get("minimum_age", ""))
+            max_age = _parse_age_years(study.get("maximum_age", ""))
+            if min_age and age < min_age:
+                continue
+            if max_age and age > max_age:
+                continue
+
+        if sex and study.get("sex") != "ALL" and study["sex"].upper() != sex.upper():
+            continue
+
+        studies.append(study)
+
+    _set_cache(cache_k, studies)
+    logger.info("trials.nci_search_complete", cancer_type=cancer_type, results=len(studies))
+    return studies
+
+
+def merge_and_deduplicate(trial_lists: list[list[dict]]) -> list[dict]:
+    """Merge multiple trial lists and deduplicate by NCT ID.
+
+    Earlier lists take priority (their version of a trial is kept).
+    """
+    seen: dict[str, dict] = {}
+    for trials in trial_lists:
+        for trial in trials:
+            nct_id = trial.get("nct_id", "")
+            if nct_id and nct_id not in seen:
+                seen[nct_id] = trial
+    return list(seen.values())
+
+
 async def get_trial(nct_id: str) -> dict | None:
     params = {"fields": FIELDS}
     try:
