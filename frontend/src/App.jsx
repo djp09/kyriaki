@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
+import CellAnimation from "./components/CellAnimation";
 import DocumentUpload from "./components/DocumentUpload";
 import IntakeForm from "./components/IntakeForm";
 import TrialResults from "./components/TrialResults";
@@ -304,8 +305,32 @@ export default function App() {
   return (
     <div className="app">
       <header>
-        <h1>Kyriaki</h1>
-        <p className="header-subtitle">Find clinical trials matched to you</p>
+        <CellAnimation />
+        <div className="header-brand">
+          <h1>Kyriaki</h1>
+          <svg className="header-logo" viewBox="0 0 64 64" width="48" height="48" aria-hidden="true">
+            {/* Globe circle */}
+            <circle cx="32" cy="32" r="29" fill="none" stroke="currentColor" strokeWidth="2.2" />
+            {/* Horizontal equator */}
+            <ellipse cx="32" cy="32" rx="29" ry="10" fill="none" stroke="currentColor" strokeWidth="1.5" />
+            {/* Vertical meridian */}
+            <ellipse cx="32" cy="32" rx="10" ry="29" fill="none" stroke="currentColor" strokeWidth="1.5" />
+            {/* Horizontal tropic lines */}
+            <ellipse cx="32" cy="20" rx="24" ry="4" fill="none" stroke="currentColor" strokeWidth="1" opacity="0.4" />
+            <ellipse cx="32" cy="44" rx="24" ry="4" fill="none" stroke="currentColor" strokeWidth="1" opacity="0.4" />
+            {/* K letter — centered, bold */}
+            <text x="32" y="33" textAnchor="middle" dominantBaseline="central"
+              fontFamily="Outfit, system-ui, sans-serif" fontWeight="800" fontSize="22"
+              fill="url(#kGrad)" letterSpacing="-0.5">K</text>
+            <defs>
+              <linearGradient id="kGrad" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0%" stopColor="#A78BFA" />
+                <stop offset="100%" stopColor="#EC4899" />
+              </linearGradient>
+            </defs>
+          </svg>
+        </div>
+        <p className="header-subtitle">Clinical trial matching, powered by AI</p>
       </header>
 
       {error && (
