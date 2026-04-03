@@ -7,6 +7,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db_models import AgentEventDB, AgentTaskDB, HumanGateDB, TaskStatus
@@ -118,6 +119,29 @@ def _create_task(
     )
     session.add(task)
     return task
+
+
+async def recover_stale_tasks(session: AsyncSession) -> int:
+    """Mark any 'running' or 'pending' tasks as failed on startup.
+
+    These tasks were orphaned by a process restart. Returns the count of
+    recovered tasks.
+    """
+    stale_statuses = [TaskStatus.running.value, TaskStatus.pending.value]
+    stmt = (
+        update(AgentTaskDB)
+        .where(AgentTaskDB.status.in_(stale_statuses))
+        .values(
+            status=TaskStatus.failed.value,
+            error="Process restarted — task was orphaned",
+            completed_at=datetime.now(timezone.utc),
+        )
+    )
+    result = await session.execute(stmt)
+    count = result.rowcount
+    if count:
+        logger.warning("dispatcher.recovered_stale_tasks", count=count)
+    return count
 
 
 async def dispatch(

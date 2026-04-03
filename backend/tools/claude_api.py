@@ -17,7 +17,7 @@ import anthropic
 
 from config import get_settings
 from logging_config import get_logger
-from tools import ToolResult, ToolSpec, register_tool
+from tools import TokenUsage, ToolResult, ToolSpec, register_tool
 
 logger = get_logger("kyriaki.tools.claude_api")
 
@@ -41,15 +41,15 @@ async def call_claude_with_retry(
     max_tokens: int,
     messages: list,
     max_retries: int = 3,
+    tools: list | None = None,
 ) -> anthropic.types.Message:
     """Call Claude with exponential backoff on rate limits."""
     for attempt in range(max_retries):
         try:
-            return await client.messages.create(
-                model=model,
-                max_tokens=max_tokens,
-                messages=messages,
-            )
+            kwargs = dict(model=model, max_tokens=max_tokens, messages=messages)
+            if tools:
+                kwargs["tools"] = tools
+            return await client.messages.create(**kwargs)
         except anthropic.RateLimitError:
             if attempt == max_retries - 1:
                 raise
@@ -86,20 +86,22 @@ async def paced_claude_call(
     model: str,
     max_tokens: int,
     messages: list,
+    tools: list | None = None,
 ) -> anthropic.types.Message:
     """Call Claude with optional inter-call delay for rate-limit pacing."""
     global _last_call_time
     settings = get_settings()
+    call_kwargs = dict(model=model, max_tokens=max_tokens, messages=messages, tools=tools)
     if settings.inter_call_delay > 0:
         async with _get_call_lock():
             now = time.monotonic()
             elapsed = now - _last_call_time
             if elapsed < settings.inter_call_delay:
                 await asyncio.sleep(settings.inter_call_delay - elapsed)
-            result = await call_claude_with_retry(client, model=model, max_tokens=max_tokens, messages=messages)
+            result = await call_claude_with_retry(client, **call_kwargs)
             _last_call_time = time.monotonic()
             return result
-    return await call_claude_with_retry(client, model=model, max_tokens=max_tokens, messages=messages)
+    return await call_claude_with_retry(client, **call_kwargs)
 
 
 # --- JSON parsing ---
@@ -206,11 +208,25 @@ def extract_minimal_result(text: str, nct_id: str) -> dict | None:
     return None
 
 
+# --- Token extraction ---
+
+
+def _extract_token_usage(response: anthropic.types.Message) -> TokenUsage:
+    """Extract token usage from a Claude API response."""
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return TokenUsage()
+    return TokenUsage(
+        input_tokens=getattr(usage, "input_tokens", 0),
+        output_tokens=getattr(usage, "output_tokens", 0),
+    )
+
+
 # --- High-level tool functions ---
 
 
 async def claude_json_call(prompt: str, *, model: str | None = None, max_tokens: int = 1500) -> ToolResult:
-    """Call Claude and parse the response as JSON. Returns ToolResult."""
+    """Call Claude and parse the response as JSON. Returns ToolResult with token_usage."""
     settings = get_settings()
     model = model or settings.claude_model
     try:
@@ -220,16 +236,17 @@ async def claude_json_call(prompt: str, *, model: str | None = None, max_tokens:
             max_tokens=max_tokens,
             messages=[{"role": "user", "content": prompt}],
         )
+        tokens = _extract_token_usage(response)
         result = parse_json_response(response.content[0].text)
         if result is None:
-            return ToolResult(success=False, error="Failed to parse JSON from Claude response")
-        return ToolResult(success=True, data=result)
+            return ToolResult(success=False, error="Failed to parse JSON from Claude response", token_usage=tokens)
+        return ToolResult(success=True, data=result, token_usage=tokens)
     except Exception as e:
         return ToolResult(success=False, error=f"{type(e).__name__}: {e}")
 
 
 async def claude_text_call(prompt: str, *, model: str | None = None, max_tokens: int = 300) -> ToolResult:
-    """Call Claude and return plain text response. Returns ToolResult."""
+    """Call Claude and return plain text response. Returns ToolResult with token_usage."""
     settings = get_settings()
     model = model or settings.claude_model
     try:
@@ -239,7 +256,8 @@ async def claude_text_call(prompt: str, *, model: str | None = None, max_tokens:
             max_tokens=max_tokens,
             messages=[{"role": "user", "content": prompt}],
         )
-        return ToolResult(success=True, data=response.content[0].text.strip())
+        tokens = _extract_token_usage(response)
+        return ToolResult(success=True, data=response.content[0].text.strip(), token_usage=tokens)
     except Exception as e:
         return ToolResult(success=False, error=f"{type(e).__name__}: {e}")
 
@@ -275,7 +293,7 @@ async def evaluate_score(
 
     result = await claude_json_call(prompt_result.data, max_tokens=500)
     if not result.success:
-        return ToolResult(success=False, error=result.error)
+        return ToolResult(success=False, error=result.error, token_usage=result.token_usage)
 
     data = result.data
     # Ensure expected shape
@@ -287,6 +305,7 @@ async def evaluate_score(
             "adjustment_reason": data.get("adjustment_reason", ""),
             "errors_found": data.get("errors_found", []),
         },
+        token_usage=result.token_usage,
     )
 
 

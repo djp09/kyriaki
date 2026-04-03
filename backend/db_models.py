@@ -137,6 +137,7 @@ class AgentTaskDB(Base):
         Index("ix_task_agent_type", "agent_type"),
         Index("ix_task_patient_id", "patient_id"),
         Index("ix_task_created_at", "created_at"),
+        Index("ix_task_patient_agent_status", "patient_id", "agent_type", "status"),
     )
 
 
@@ -175,6 +176,7 @@ class HumanGateDB(Base):
     __table_args__ = (
         Index("ix_gate_task_id", "task_id"),
         Index("ix_gate_status", "status"),
+        Index("ix_gate_type", "gate_type"),
     )
 
 
@@ -222,4 +224,5 @@ class TrialOutcomeDB(Base):
         Index("ix_outcome_patient_id", "patient_id"),
         Index("ix_outcome_nct_id", "nct_id"),
         Index("ix_outcome_patient_nct", "patient_id", "nct_id", unique=True),
+        Index("ix_outcome_screening_result", "screening_result"),
     )

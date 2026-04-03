@@ -30,7 +30,7 @@ from db_service import (
     list_tasks_for_patient,
     save_patient_profile,
 )
-from dispatcher import dispatch_background
+from dispatcher import dispatch_background, recover_stale_tasks
 from logging_config import get_logger, setup_logging
 from matching_engine import match_trials
 from middleware import RequestLoggingMiddleware
@@ -53,7 +53,7 @@ from models import (
     TaskResponse,
 )
 from tools.ground_truth import compute_outcome_stats, get_outcomes_for_patient, upsert_outcome
-from trials_client import get_trial
+from trials_client import close_http_client, get_trial
 
 settings = get_settings()
 setup_logging(log_level=settings.log_level, log_format=settings.log_format)
@@ -115,6 +115,13 @@ async def lifespan(app: FastAPI):
             await conn.run_sync(Base.metadata.create_all)
         logger.info("db.auto_created_tables", backend="sqlite")
 
+    # Recover any tasks orphaned by a prior process restart
+    async with async_session() as session:
+        recovered = await recover_stale_tasks(session)
+        await session.commit()
+        if recovered:
+            logger.info("startup.recovered_stale_tasks", count=recovered)
+
     monitor_task = None
     if settings.monitor_enabled:
         monitor_task = asyncio.create_task(_monitor_loop())
@@ -124,6 +131,7 @@ async def lifespan(app: FastAPI):
 
     if monitor_task:
         monitor_task.cancel()
+    await close_http_client()
 
 
 app = FastAPI(title="Kyriaki", description="Clinical trial matching engine for cancer patients", lifespan=lifespan)

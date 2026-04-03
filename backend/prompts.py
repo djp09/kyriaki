@@ -46,10 +46,7 @@ You are an oncology clinical trial search strategist. Your goal is to find the b
 - Be efficient: don't analyze if you haven't searched yet. Don't search again if you already have plenty of candidates.
 
 ## Your Decision
-Based on the patient profile, history, and budget, decide your next action. Think step by step about what will most effectively find matching trials for this specific patient.
-
-Respond with ONLY a JSON object:
-{{"action": "<search|analyze_batch|evaluate|finish>", "reasoning": "<1-2 sentences explaining why>", "params": {{...}}}}
+Based on the patient profile, history, and budget, decide your next action. Think step by step about what will most effectively find matching trials for this specific patient, then call the appropriate tool.
 """
 
 DOSSIER_ORCHESTRATOR_PROMPT = """\
@@ -85,8 +82,7 @@ You are an oncology eligibility analyst strategist. Your goal is to produce the 
 - If a trial's revised score drops below 20 after deep analysis, note it but move on to the next trial.
 - Once all top matches are analyzed, finish.
 
-Respond with ONLY a JSON object:
-{{"action": "<deep_analyze|investigate_criterion|finish>", "reasoning": "<1-2 sentences>", "params": {{...}}}}
+Think step by step, then call the appropriate tool.
 """
 
 ENROLLMENT_ORCHESTRATOR_PROMPT = """\
@@ -128,8 +124,7 @@ You are a clinical trial enrollment specialist. Your goal is to produce a comple
 - If no site contacts are available, note this in the outreach draft so the navigator knows to find contacts manually.
 - Generate all three components (packet, prep, outreach) before finishing.
 
-Respond with ONLY a JSON object:
-{{"action": "<generate_packet|generate_prep_guide|generate_outreach|fetch_site_info|finish>", "reasoning": "<1-2 sentences>", "params": {{...}}}}
+Think step by step, then call the appropriate tool.
 """
 
 OUTREACH_ORCHESTRATOR_PROMPT = """\
@@ -163,8 +158,7 @@ You are a patient navigator communication strategist. Your goal is to produce th
 - If no contacts have names, use the draft as-is with the generic "Research Coordinator" salutation.
 - One personalized message is enough — don't over-iterate.
 
-Respond with ONLY a JSON object:
-{{"action": "<fetch_contacts|personalize|finish>", "reasoning": "<1-2 sentences>", "params": {{...}}}}
+Think step by step, then call the appropriate tool.
 """
 
 MONITOR_ORCHESTRATOR_PROMPT = """\
@@ -196,8 +190,7 @@ You are a clinical trial monitoring analyst. Your goal is to detect meaningful c
 - If new sites were added, check if any are closer to the patient.
 - After checking all trials, finish.
 
-Respond with ONLY a JSON object:
-{{"action": "<check_trial|assess_impact|finish>", "reasoning": "<1-2 sentences>", "params": {{...}}}}
+Think step by step, then call the appropriate tool.
 """
 
 ELIGIBILITY_ANALYSIS_PROMPT = """\

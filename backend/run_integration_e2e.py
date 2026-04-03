@@ -118,6 +118,13 @@ async def test_matching_agent(session: AsyncSession, patient: PatientProfileDB) 
         for i, m in enumerate(matches):
             print(f"    [{i + 1}] {m['nct_id']} — score {m.get('match_score', '?')}: {m['brief_title'][:70]}")
 
+        # Token tracking validation
+        token_usage = task.output_data.get("token_usage")
+        if token_usage:
+            print(f"  Token usage:  {token_usage['input_tokens']} in / {token_usage['output_tokens']} out / {token_usage['total_tokens']} total")
+        else:
+            print("  Token usage:  NOT TRACKED (unexpected)")
+
     # Check events
     events = [obj for obj in session.new | session.dirty if isinstance(obj, AgentEventDB)]
     # Query instead since objects were already flushed
@@ -176,6 +183,13 @@ async def test_dossier_agent(
                 print(f"    Justification: {section.get('score_justification', '')[:100]}...")
             if "analysis_error" in section:
                 print(f"    Analysis error: {section['analysis_error']}")
+
+        # Token tracking validation
+        token_usage = task.output_data.get("token_usage")
+        if token_usage:
+            print(f"  Token usage:  {token_usage['input_tokens']} in / {token_usage['output_tokens']} out / {token_usage['total_tokens']} total")
+        else:
+            print("  Token usage:  NOT TRACKED (unexpected)")
 
     # Check for human gate
     from sqlalchemy import select

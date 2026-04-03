@@ -8,10 +8,11 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from agent_loop import Scratchpad
-from agents import AgentContext, DossierAgent, MatchingAgent
-from db_models import AgentEventDB, GateStatus, HumanGateDB, TaskStatus
-from dispatcher import dispatch, dispatch_background
+from agent_loop import FINISH_TOOL, Scratchpad, ToolDefinition, _build_tool_use_tools
+from agents import MATCHING_TOOLS, AgentContext, DossierAgent, MatchingAgent
+from tools import TokenUsage
+from db_models import AgentEventDB, AgentTaskDB, GateStatus, HumanGateDB, TaskStatus
+from dispatcher import dispatch, dispatch_background, recover_stale_tasks
 from models import (
     ActivityItem,
     DossierRequest,
@@ -587,3 +588,188 @@ class TestPhase2BEndpoints:
         assert resp.status_code == 200
         data = resp.json()
         assert "items" in data
+
+
+# ---------------------------------------------------------------------------
+# Token tracking tests
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Stale task recovery tests
+# ---------------------------------------------------------------------------
+
+_is_postgres = "postgresql" in os.environ.get("KYRIAKI_DATABASE_URL", "")
+
+
+@pytest.mark.skipif(_is_postgres, reason="Uses SQLite test DB")
+class TestStaleTaskRecovery:
+    @pytest.fixture
+    async def db_session(self):
+        from database import async_session, engine
+        from db_models import Base
+
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        async with async_session() as session:
+            yield session
+
+    @pytest.mark.asyncio
+    async def test_recover_stale_running_tasks(self, db_session):
+        """Running tasks are marked failed on recovery."""
+        patient_id = uuid.uuid4()
+        task = AgentTaskDB(
+            agent_type="matching",
+            status=TaskStatus.running.value,
+            patient_id=patient_id,
+            input_data={},
+        )
+        db_session.add(task)
+        await db_session.flush()
+        task_id = task.id
+
+        count = await recover_stale_tasks(db_session)
+        assert count >= 1
+
+        await db_session.refresh(task)
+        assert task.status == TaskStatus.failed.value
+        assert "orphaned" in task.error
+
+    @pytest.mark.asyncio
+    async def test_recover_stale_pending_tasks(self, db_session):
+        """Pending tasks are also recovered."""
+        patient_id = uuid.uuid4()
+        task = AgentTaskDB(
+            agent_type="matching",
+            status=TaskStatus.pending.value,
+            patient_id=patient_id,
+            input_data={},
+        )
+        db_session.add(task)
+        await db_session.flush()
+
+        count = await recover_stale_tasks(db_session)
+        assert count >= 1
+
+        await db_session.refresh(task)
+        assert task.status == TaskStatus.failed.value
+
+    @pytest.mark.asyncio
+    async def test_completed_tasks_not_affected(self, db_session):
+        """Completed tasks are not touched by recovery."""
+        patient_id = uuid.uuid4()
+        task = AgentTaskDB(
+            agent_type="matching",
+            status=TaskStatus.completed.value,
+            patient_id=patient_id,
+            input_data={},
+            output_data={"matches": []},
+        )
+        db_session.add(task)
+        await db_session.flush()
+
+        await recover_stale_tasks(db_session)
+
+        await db_session.refresh(task)
+        assert task.status == TaskStatus.completed.value
+        assert task.error is None
+
+
+# ---------------------------------------------------------------------------
+# Tool use planning tests
+# ---------------------------------------------------------------------------
+
+
+class TestToolUse:
+    def test_build_tool_use_tools_includes_finish(self):
+        """Tool list always includes the finish tool."""
+        tools = _build_tool_use_tools([MATCHING_TOOLS[0]])
+        names = [t["name"] for t in tools]
+        assert "finish" in names
+        assert "search" in names
+
+    def test_build_tool_use_tools_all_matching(self):
+        tools = _build_tool_use_tools(MATCHING_TOOLS)
+        names = [t["name"] for t in tools]
+        assert set(names) == {"search", "analyze_batch", "evaluate", "finish"}
+
+    def test_tool_definition_schema(self):
+        """Tool definitions produce valid Claude API tool format."""
+        tools = _build_tool_use_tools(MATCHING_TOOLS)
+        for tool in tools:
+            assert "name" in tool
+            assert "description" in tool
+            assert "input_schema" in tool
+            assert tool["input_schema"]["type"] == "object"
+
+    def test_finish_tool_has_reason(self):
+        tools = _build_tool_use_tools([])
+        finish = next(t for t in tools if t["name"] == "finish")
+        assert "reason" in finish["input_schema"]["properties"]
+
+    def test_matching_search_tool_requires_query_cond(self):
+        search = next(t for t in MATCHING_TOOLS if t.name == "search")
+        assert "query_cond" in search.parameters["required"]
+
+
+class TestTokenTracking:
+    def test_token_usage_total(self):
+        usage = TokenUsage(input_tokens=100, output_tokens=50)
+        assert usage.total_tokens == 150
+
+    def test_token_usage_defaults(self):
+        usage = TokenUsage()
+        assert usage.input_tokens == 0
+        assert usage.output_tokens == 0
+        assert usage.total_tokens == 0
+
+    def test_scratchpad_total_token_usage(self):
+        scratchpad = Scratchpad()
+        scratchpad.add(0, "search", "reason", {}, "ok", True, TokenUsage(100, 50))
+        scratchpad.add(1, "analyze", "reason", {}, "ok", True, TokenUsage(200, 80))
+        scratchpad.add(2, "finish", "done", {}, "ok", True)  # no tokens
+
+        total = scratchpad.total_token_usage
+        assert total.input_tokens == 300
+        assert total.output_tokens == 130
+        assert total.total_tokens == 430
+
+    def test_scratchpad_empty_token_usage(self):
+        scratchpad = Scratchpad()
+        total = scratchpad.total_token_usage
+        assert total.total_tokens == 0
+
+    @pytest.mark.asyncio
+    async def test_matching_agent_includes_token_usage(self, sample_patient_data):
+        """MatchingAgent output_data includes token_usage."""
+        agent = MatchingAgent()
+
+        async def mock_emit(event_type, data=None):
+            pass
+
+        ctx = AgentContext(
+            task_id=uuid.uuid4(),
+            patient_id=uuid.uuid4(),
+            input_data={"patient": sample_patient_data, "max_results": 5},
+            emit=mock_emit,
+        )
+
+        mock_scratchpad = _build_matching_scratchpad()
+        # Add token usage to scratchpad entries
+        mock_scratchpad.entries[0].token_usage = TokenUsage(500, 100)
+        mock_scratchpad.entries[1].token_usage = TokenUsage(800, 200)
+
+        mock_loop = AsyncMock(return_value=mock_scratchpad)
+        mock_summary = AsyncMock(return_value=ToolResult(success=True, data="Summary"))
+
+        with (
+            patch("agents.run_agent_loop", mock_loop),
+            patch("agents.claude_text_call", mock_summary),
+        ):
+            result = await agent.execute(ctx)
+
+        assert result.success
+        assert "token_usage" in result.output_data
+        assert result.output_data["token_usage"]["input_tokens"] == 1300
+        assert result.output_data["token_usage"]["output_tokens"] == 300
+        assert result.output_data["token_usage"]["total_tokens"] == 1600

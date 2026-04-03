@@ -14,12 +14,25 @@ from typing import Any
 
 
 @dataclass
+class TokenUsage:
+    """Token counts for a single Claude API call."""
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+    @property
+    def total_tokens(self) -> int:
+        return self.input_tokens + self.output_tokens
+
+
+@dataclass
 class ToolResult:
     """Standard return type for all tools."""
 
     success: bool
     data: Any = None
     error: str | None = None
+    token_usage: TokenUsage | None = None
 
 
 @dataclass

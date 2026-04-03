@@ -403,3 +403,39 @@ class TestEndpoints:
         """Invalid NCT ID format should return 400."""
         resp = client.get("/api/trials/NOT_VALID")
         assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Shared HTTP client tests
+# ---------------------------------------------------------------------------
+
+
+class TestSharedHttpClient:
+    def test_module_level_client_starts_none(self):
+        """The shared client starts as None before first use."""
+        import trials_client
+
+        # Reset to ensure clean state
+        trials_client._shared_client = None
+        assert trials_client._shared_client is None
+
+    @pytest.mark.asyncio
+    async def test_get_and_close_http_client(self):
+        """get_http_client creates a reusable client, close_http_client cleans it up."""
+        import trials_client
+
+        # Ensure clean state
+        trials_client._shared_client = None
+        trials_client._client_lock = None
+
+        client = await trials_client.get_http_client()
+        assert client is not None
+        assert not client.is_closed
+        assert "Kyriaki" in client.headers.get("User-Agent", "")
+
+        # Same instance on second call
+        client2 = await trials_client.get_http_client()
+        assert client is client2
+
+        await trials_client.close_http_client()
+        assert trials_client._shared_client is None

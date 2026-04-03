@@ -14,6 +14,39 @@ logger = get_logger("kyriaki.trials")
 
 BASE_URL = "https://clinicaltrials.gov/api/v2"
 
+# Module-level shared HTTP client — reuses connections across requests
+_shared_client: httpx.AsyncClient | None = None
+_client_lock: asyncio.Lock | None = None
+
+
+def _get_client_lock() -> asyncio.Lock:
+    """Lazily create the lock (Python 3.9 compat — no event loop at import time)."""
+    global _client_lock
+    if _client_lock is None:
+        _client_lock = asyncio.Lock()
+    return _client_lock
+
+
+async def get_http_client() -> httpx.AsyncClient:
+    """Get or create the shared HTTP client with connection pooling."""
+    global _shared_client
+    async with _get_client_lock():
+        if _shared_client is None or _shared_client.is_closed:
+            _shared_client = httpx.AsyncClient(
+                timeout=30,
+                limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+                headers={"User-Agent": "Kyriaki/1.0 (clinical-trial-matching)"},
+            )
+        return _shared_client
+
+
+async def close_http_client() -> None:
+    """Close the shared HTTP client. Call on app shutdown."""
+    global _shared_client
+    if _shared_client and not _shared_client.is_closed:
+        await _shared_client.aclose()
+        _shared_client = None
+
 FIELDS = ",".join(
     [
         "NCTId",
@@ -150,15 +183,14 @@ async def _http_get_with_retry(
     url: str,
     params: dict,
     max_retries: int = 3,
-    timeout: float = 30,
 ) -> httpx.Response:
+    client = await get_http_client()
     last_exc: Exception | None = None
     for attempt in range(max_retries):
         try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                resp = await client.get(url, params=params)
-                resp.raise_for_status()
-                return resp
+            resp = await client.get(url, params=params)
+            resp.raise_for_status()
+            return resp
         except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout) as e:
             last_exc = e
             wait = 2**attempt

@@ -21,7 +21,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, ClassVar
 
-from agent_loop import AgentBudget, AgentDecision, Scratchpad, run_agent_loop
+from agent_loop import AgentBudget, AgentDecision, Scratchpad, ToolDefinition, run_agent_loop
+from tools import TokenUsage
 from config import get_settings
 from dispatcher import register_agent
 from logging_config import get_logger
@@ -106,6 +107,138 @@ class BaseAgent(ABC):
 # ---------------------------------------------------------------------------
 
 
+MATCHING_TOOLS = [
+    ToolDefinition(
+        name="search",
+        description="Search ClinicalTrials.gov for recruiting trials matching criteria.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "query_cond": {"type": "string", "description": "Condition to search (e.g., 'Non-Small Cell Lung Cancer')"},
+                "query_intr": {"type": "string", "description": "Intervention search (e.g., 'osimertinib')"},
+                "query_term": {"type": "string", "description": "General term search (e.g., 'immunotherapy EGFR')"},
+                "page_size": {"type": "integer", "description": "Max results (10-50)", "default": 20},
+            },
+            "required": ["query_cond"],
+        },
+    ),
+    ToolDefinition(
+        name="analyze_batch",
+        description="Run eligibility analysis on all unanalyzed trials in the pool.",
+        parameters={"type": "object", "properties": {}, "required": []},
+    ),
+    ToolDefinition(
+        name="evaluate",
+        description="Re-evaluate borderline scores (30-70) for accuracy using a second opinion.",
+        parameters={"type": "object", "properties": {}, "required": []},
+    ),
+]
+
+DOSSIER_TOOLS = [
+    ToolDefinition(
+        name="deep_analyze",
+        description="Run deep criterion-by-criterion analysis on a specific trial.",
+        parameters={
+            "type": "object",
+            "properties": {"nct_id": {"type": "string", "description": "Trial NCT ID to analyze"}},
+            "required": ["nct_id"],
+        },
+    ),
+    ToolDefinition(
+        name="investigate_criterion",
+        description="Fetch fresh trial data to resolve an ambiguous criterion.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "nct_id": {"type": "string", "description": "Trial NCT ID"},
+                "question": {"type": "string", "description": "What to investigate"},
+            },
+            "required": ["nct_id", "question"],
+        },
+    ),
+]
+
+ENROLLMENT_TOOLS = [
+    ToolDefinition(
+        name="fetch_site_info",
+        description="Fetch fresh trial data for site/contact details.",
+        parameters={
+            "type": "object",
+            "properties": {"nct_id": {"type": "string", "description": "Trial NCT ID"}},
+            "required": ["nct_id"],
+        },
+    ),
+    ToolDefinition(
+        name="generate_packet",
+        description="Generate the screening checklist and enrollment packet.",
+        parameters={"type": "object", "properties": {}, "required": []},
+    ),
+    ToolDefinition(
+        name="generate_prep_guide",
+        description="Generate patient preparation guide for the screening visit.",
+        parameters={"type": "object", "properties": {}, "required": []},
+    ),
+    ToolDefinition(
+        name="generate_outreach",
+        description="Draft site coordinator outreach message.",
+        parameters={"type": "object", "properties": {}, "required": []},
+    ),
+]
+
+OUTREACH_TOOLS = [
+    ToolDefinition(
+        name="fetch_contacts",
+        description="Fetch trial data to extract site coordinator contacts.",
+        parameters={
+            "type": "object",
+            "properties": {"nct_id": {"type": "string", "description": "Trial NCT ID"}},
+            "required": ["nct_id"],
+        },
+    ),
+    ToolDefinition(
+        name="personalize",
+        description="Personalize the outreach message for a specific contact.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "contact_name": {"type": "string", "description": "Contact person's name"},
+                "facility": {"type": "string", "description": "Facility name"},
+            },
+            "required": ["contact_name", "facility"],
+        },
+    ),
+]
+
+MONITOR_TOOLS = [
+    ToolDefinition(
+        name="check_trial",
+        description="Fetch current trial data and compare to last known state.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "nct_id": {"type": "string", "description": "Trial NCT ID"},
+                "last_status": {"type": "string", "description": "Previous known status"},
+                "last_site_count": {"type": "integer", "description": "Previous known site count"},
+            },
+            "required": ["nct_id"],
+        },
+    ),
+    ToolDefinition(
+        name="assess_impact",
+        description="For a detected change, assess its impact on the patient.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "nct_id": {"type": "string", "description": "Trial NCT ID"},
+                "change_type": {"type": "string", "description": "Type of change (status_changed, sites_added)"},
+                "detail": {"type": "string", "description": "What changed"},
+            },
+            "required": ["nct_id", "change_type", "detail"],
+        },
+    ),
+]
+
+
 @register_agent
 class MatchingAgent(BaseAgent):
     """Adaptive agent: plans search strategy, analyzes, refines, and self-corrects.
@@ -169,6 +302,7 @@ class MatchingAgent(BaseAgent):
             scratchpad=scratchpad,
             budget=budget,
             emit=ctx.emit,
+            tool_definitions=MATCHING_TOOLS,
         )
 
         # Build final result from scratchpad state
@@ -176,12 +310,18 @@ class MatchingAgent(BaseAgent):
         matches = self._build_final_matches(scratchpad, patient, max_results)
         matches_data = [m.model_dump() for m in matches]
 
+        total_tokens = scratchpad.total_token_usage
         return AgentResult(
             success=True,
             output_data={
                 "patient_summary": patient_summary,
                 "matches": matches_data,
                 "total_trials_screened": len(scratchpad.state.get("trials_pool", {})),
+                "token_usage": {
+                    "input_tokens": total_tokens.input_tokens,
+                    "output_tokens": total_tokens.output_tokens,
+                    "total_tokens": total_tokens.total_tokens,
+                },
             },
         )
 
@@ -462,10 +602,12 @@ class DossierAgent(BaseAgent):
             action_handlers=handlers,
             scratchpad=scratchpad,
             emit=ctx.emit,
+            tool_definitions=DOSSIER_TOOLS,
         )
 
         # Assemble dossier from completed analyses
         sections = list(scratchpad.state.get("sections", {}).values())
+        total_tokens = scratchpad.total_token_usage
         dossier = {
             "patient_summary": ctx.input_data.get("patient_summary", ""),
             "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -474,7 +616,14 @@ class DossierAgent(BaseAgent):
 
         return AgentResult(
             success=True,
-            output_data={"dossier": dossier},
+            output_data={
+                "dossier": dossier,
+                "token_usage": {
+                    "input_tokens": total_tokens.input_tokens,
+                    "output_tokens": total_tokens.output_tokens,
+                    "total_tokens": total_tokens.total_tokens,
+                },
+            },
             gate_request=GateRequest(gate_type="dossier_review", requested_data={"dossier": dossier}),
         )
 
@@ -586,6 +735,7 @@ class EnrollmentAgent(BaseAgent):
             action_handlers=handlers,
             scratchpad=scratchpad,
             emit=ctx.emit,
+            tool_definitions=ENROLLMENT_TOOLS,
         )
 
         state = scratchpad.state
@@ -739,6 +889,7 @@ class OutreachAgent(BaseAgent):
             action_handlers=handlers,
             scratchpad=scratchpad,
             emit=ctx.emit,
+            tool_definitions=OUTREACH_TOOLS,
         )
 
         state = scratchpad.state
@@ -831,6 +982,7 @@ class MonitorAgent(BaseAgent):
             action_handlers=handlers,
             scratchpad=scratchpad,
             emit=ctx.emit,
+            tool_definitions=MONITOR_TOOLS,
         )
 
         return AgentResult(
