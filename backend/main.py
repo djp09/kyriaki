@@ -105,11 +105,14 @@ async def lifespan(app: FastAPI):
         logger.info("db.auto_created_tables", backend="sqlite")
 
     # Recover any tasks orphaned by a prior process restart
-    async with async_session() as session:
-        recovered = await recover_stale_tasks(session)
-        await session.commit()
-        if recovered:
-            logger.info("startup.recovered_stale_tasks", count=recovered)
+    try:
+        async with async_session() as session:
+            recovered = await recover_stale_tasks(session)
+            await session.commit()
+            if recovered:
+                logger.info("startup.recovered_stale_tasks", count=recovered)
+    except Exception as e:
+        logger.warning("startup.recovery_skipped", error=f"{type(e).__name__}: {e}")
 
     monitor_task = None
     if settings.monitor_enabled:
