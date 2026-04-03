@@ -95,13 +95,14 @@ def calculate_match_score(evaluations: list[dict], flags: list[str] | None = Non
     confidence_bonus = (high_confidence_met / max(total, 1)) * 10
 
     # --- NOT_MET penalty ---
-    # Each NOT_MET drags the score down
-    not_met_penalty = not_met * 8
+    # Each NOT_MET drags the score down, but cap to avoid over-penalizing
+    not_met_penalty = min(not_met * 8, 24)
 
     # --- Exclusion safety margin ---
-    # Unknown exclusions are risky — penalize
+    # Unknown exclusions are risky — penalize, but cap at 15 to avoid
+    # crushing scores when patient data is incomplete (common for intake forms)
     unknown_exclusions = len([e for e in exclusion if e.get("status") == "INSUFFICIENT_INFO"])
-    exclusion_penalty = unknown_exclusions * 3
+    exclusion_penalty = min(unknown_exclusions * 3, 15)
 
     final_score = min(100.0, max(0.0, base_score + confidence_bonus - not_met_penalty - exclusion_penalty))
 
