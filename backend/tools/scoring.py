@@ -53,32 +53,47 @@ def calculate_match_score(evaluations: list[dict], flags: list[str] | None = Non
         }
 
     # --- Hard NOT_MET on critical inclusion criteria ---
+    # Only hard-exclude if a critical category has NOT_MET but NO MET criteria.
+    # Multi-cohort trials (common in oncology) have criteria for different cohorts —
+    # a patient may fail one cohort's criterion while meeting another's.
+    CRITICAL_CATEGORIES = {"diagnosis", "biomarker", "stage", "demographic"}
     not_met_critical = [
         e
         for e in inclusion
         if e.get("status") == "NOT_MET"
         and e.get("confidence") == "HIGH"
-        and e.get("category", "") in ("diagnosis", "biomarker", "stage", "demographic")
+        and e.get("category", "") in CRITICAL_CATEGORIES
     ]
     if not_met_critical:
-        failed = not_met_critical[0]
-        return {
-            "score": 5.0,
-            "tier": "EXCLUDED",
-            "match_explanation": (
-                f"This trial requires a criterion you do not meet: "
-                f"{failed.get('criterion_text', 'Unknown criterion')}. "
-                f"{failed.get('reasoning', '')}"
-            ),
-            "criteria_met": len([e for e in inclusion if e.get("status") == "MET"]),
-            "criteria_not_met": len([e for e in inclusion if e.get("status") == "NOT_MET"]),
-            "criteria_unknown": len([e for e in inclusion if e.get("status") == "INSUFFICIENT_INFO"]),
-            "criteria_total": len(inclusion),
-            "exclusions_clear": len([e for e in exclusion if e.get("status") == "NOT_TRIGGERED"]),
-            "exclusions_triggered": 0,
-            "exclusions_unknown": len([e for e in exclusion if e.get("status") == "INSUFFICIENT_INFO"]),
-            "flags_for_oncologist": flags or [],
+        # Check if any critical category criterion is also MET — if so, the patient
+        # may qualify under a different cohort, so don't hard-exclude
+        met_critical_categories = {
+            e.get("category")
+            for e in inclusion
+            if e.get("status") == "MET" and e.get("category", "") in CRITICAL_CATEGORIES
         }
+        not_met_categories = {e.get("category") for e in not_met_critical}
+        # Only hard-exclude if a NOT_MET category has zero MET criteria
+        unmet_categories = not_met_categories - met_critical_categories
+        if unmet_categories:
+            failed = next(e for e in not_met_critical if e.get("category") in unmet_categories)
+            return {
+                "score": 5.0,
+                "tier": "EXCLUDED",
+                "match_explanation": (
+                    f"This trial requires a criterion you do not meet: "
+                    f"{failed.get('criterion_text', 'Unknown criterion')}. "
+                    f"{failed.get('reasoning', '')}"
+                ),
+                "criteria_met": len([e for e in inclusion if e.get("status") == "MET"]),
+                "criteria_not_met": len([e for e in inclusion if e.get("status") == "NOT_MET"]),
+                "criteria_unknown": len([e for e in inclusion if e.get("status") == "INSUFFICIENT_INFO"]),
+                "criteria_total": len(inclusion),
+                "exclusions_clear": len([e for e in exclusion if e.get("status") == "NOT_TRIGGERED"]),
+                "exclusions_triggered": 0,
+                "exclusions_unknown": len([e for e in exclusion if e.get("status") == "INSUFFICIENT_INFO"]),
+                "flags_for_oncologist": flags or [],
+            }
 
     # --- Score inclusion criteria ---
     met = len([e for e in inclusion if e.get("status") == "MET"])
