@@ -34,6 +34,59 @@ KYRIAKI_TRIAL_REFRESH_ENABLED=false
 KYRIAKI_AUTO_CHAIN_MATCHING_TO_DOSSIER=false
 ```
 
+## Local Gemma (ADR-002 hybrid pipeline)
+
+Stages 1, 3, and 4 of the matching pipeline run on self-hosted Gemma to keep
+PHI local. In dev, Gemma runs via Ollama on your machine.
+
+### Setup
+
+```bash
+# Install Ollama (official macOS app — NOT the Homebrew formula, which has
+# Metal shader issues on M5/Tahoe as of v0.20.2)
+brew install --cask ollama-app
+
+# Launch Ollama (lives in menu bar, serves on localhost:11434)
+open -a Ollama
+
+# Pull models
+ollama pull gemma3:12b        # ~8GB — generation (intake normalization, criterion extraction)
+ollama pull nomic-embed-text  # ~274MB — embeddings (semantic recall)
+
+# Verify
+curl -s http://localhost:11434/api/tags | python3 -m json.tool
+```
+
+### Config
+
+```bash
+# Add to .env (defaults shown — only override if needed)
+KYRIAKI_GEMMA_BACKEND=ollama              # "ollama" for dev, "vertex" for prod
+KYRIAKI_OLLAMA_HOST=http://localhost:11434
+KYRIAKI_GEMMA_GENERATE_MODEL=gemma3:12b
+KYRIAKI_GEMMA_EMBED_MODEL=nomic-embed-text
+```
+
+### Running the prototypes
+
+```bash
+# Stage 1 — intake normalization (5 test patients)
+python3 -m backend.scripts.prototype_intake
+
+# Stage 4 — criterion extraction (3 trial eligibility blocks)
+python3 -m backend.scripts.prototype_criterion
+```
+
+### Known issues
+
+- **Homebrew `ollama` formula (NOT cask)** fails on Apple M5 / macOS 26 Tahoe
+  with `ggml_metal_library_init: error: failed to create library`. The official
+  `ollama-app` cask bundles a precompiled Metal library and works correctly.
+- **Latency**: ~7–13s per call on M5 Pro for gemma3:12b. Acceptable for dev;
+  Vertex AI endpoints will be faster in prod.
+- **OLLAMA_NUM_GPU=0** does NOT bypass the Metal issue — the runner initializes
+  Metal regardless.
+
 ## Testing
 
 ```bash
@@ -182,6 +235,10 @@ backend/
 ├── dispatcher.py          # Task lifecycle, duplicate guard, pipeline state, retry
 ├── routing.py             # Patient complexity classification (simple/moderate/complex)
 ├── prompts.py             # All prompt templates
+├── gemma_client.py        # Local Gemma LLM client (Ollama dev / Vertex prod)
+├── intake.py              # Stage 1: intake normalization (Gemma, local)
+├── semantic_recall.py     # Stage 3: embedding + cosine-rank (Gemma, local)
+├── criterion_extraction.py # Stage 4: eligibility text → structured criteria (Gemma, local)
 ├── matching_engine.py     # Legacy sync matching (uses new criterion pipeline)
 ├── trials_client.py       # ClinicalTrials.gov + NCI API client
 ├── civic_client.py        # CIViC biomarker evidence API
@@ -207,7 +264,10 @@ backend/
 ├── db_service.py          # DB CRUD + profile versioning
 ├── config.py              # Pydantic settings
 ├── main.py                # FastAPI app + endpoints
-└── alembic/versions/      # DB migrations (001-007)
+├── scripts/
+│   ├── prototype_intake.py    # Stage 1 Gemma prototype harness
+│   └── prototype_criterion.py # Stage 4 Gemma prototype harness
+└── alembic/versions/      # DB migrations (001-010)
 
 frontend/
 ├── src/
