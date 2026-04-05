@@ -17,13 +17,55 @@ from db_models import (
     PatientProfileDB,
     PatientProfileVersionDB,
 )
+from phi.audit import ACTION_READ, ACTION_WRITE, record_phi_access
+
+_AUDIT_ACTOR_DEFAULT = "system"
 
 
-async def save_patient_profile(session: AsyncSession, profile_data: dict) -> PatientProfileDB:
-    """Persist a patient profile and return the ORM instance."""
+def _maybe_encrypt_profile(patient: PatientProfileDB, snapshot: dict) -> None:
+    """Populate the at-rest encrypted blob + hash on ``patient``.
+
+    No-ops silently if the PHI key ring is not configured (dev/test with
+    encryption disabled). See ADR-004.
+    """
+    try:
+        from phi.keys import KeyConfigError
+        from phi.profile_storage import encrypt_profile
+    except ImportError:  # pragma: no cover
+        return
+    try:
+        blob, key_id, hash_hex = encrypt_profile(snapshot)
+    except KeyConfigError:
+        return
+    patient.profile_encrypted = blob
+    patient.encryption_key_id = key_id
+    patient.profile_hash = hash_hex
+
+
+async def save_patient_profile(
+    session: AsyncSession,
+    profile_data: dict,
+    *,
+    actor: str = _AUDIT_ACTOR_DEFAULT,
+    purpose: str | None = None,
+) -> PatientProfileDB:
+    """Persist a patient profile and return the ORM instance.
+
+    Also populates the at-rest encrypted blob and emits an audit-log entry.
+    """
     patient = PatientProfileDB(**profile_data)
+    _maybe_encrypt_profile(patient, profile_data)
     session.add(patient)
     await session.flush()
+    await record_phi_access(
+        session,
+        actor=actor,
+        action=ACTION_WRITE,
+        resource_type="patient_profile",
+        resource_id=str(patient.id),
+        purpose=purpose,
+        metadata={"op": "create", "fields": sorted(profile_data.keys())},
+    )
     return patient
 
 
@@ -62,6 +104,9 @@ async def update_patient_profile(
     session: AsyncSession,
     patient_id: UUID,
     updates: dict,
+    *,
+    actor: str = _AUDIT_ACTOR_DEFAULT,
+    purpose: str | None = None,
 ) -> PatientProfileDB | None:
     """Update a patient profile and create a version snapshot of the old state.
 
@@ -94,7 +139,39 @@ async def update_patient_profile(
 
     # Bump version
     patient.version = patient.version + 1
+    _maybe_encrypt_profile(patient, new_snapshot)
     await session.flush()
+    await record_phi_access(
+        session,
+        actor=actor,
+        action=ACTION_WRITE,
+        resource_type="patient_profile",
+        resource_id=str(patient_id),
+        purpose=purpose,
+        metadata={"op": "update", "version": patient.version, "changes": change_summary},
+    )
+    return patient
+
+
+async def read_patient_profile(
+    session: AsyncSession,
+    patient_id: UUID,
+    *,
+    actor: str = _AUDIT_ACTOR_DEFAULT,
+    purpose: str | None = None,
+) -> PatientProfileDB | None:
+    """Load a patient profile and emit an audit read event."""
+    patient = await session.get(PatientProfileDB, patient_id)
+    if patient is None:
+        return None
+    await record_phi_access(
+        session,
+        actor=actor,
+        action=ACTION_READ,
+        resource_type="patient_profile",
+        resource_id=str(patient_id),
+        purpose=purpose,
+    )
     return patient
 
 

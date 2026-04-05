@@ -16,6 +16,7 @@ import anthropic
 
 from config import get_settings
 from logging_config import get_logger
+from phi.boundary import to_external_llm
 from tools import TokenUsage, ToolResult, ToolSpec, register_tool
 
 logger = get_logger("kyriaki.tools.claude_api")
@@ -41,13 +42,31 @@ async def call_claude_with_retry(
     messages: list,
     max_retries: int = 3,
     tools: list | None = None,
+    allow_binary: bool = False,
 ) -> anthropic.types.Message:
-    """Call Claude with exponential backoff on rate limits."""
+    """Call Claude with exponential backoff on rate limits.
+
+    All outgoing payloads are routed through ``phi.boundary.to_external_llm``
+    which enforces HIPAA Safe Harbor de-identification. See ADR-004.
+    """
+    payload = to_external_llm(
+        model=model,
+        max_tokens=max_tokens,
+        messages=messages,
+        tools=tools,
+        allow_binary=allow_binary,
+    )
+    if payload.redaction_report:
+        logger.info("phi.boundary.redacted", **payload.redaction_report)
     for attempt in range(max_retries):
         try:
-            create_kwargs = {"model": model, "max_tokens": max_tokens, "messages": messages}
-            if tools:
-                create_kwargs["tools"] = tools
+            create_kwargs = {
+                "model": payload.model,
+                "max_tokens": payload.max_tokens,
+                "messages": payload.messages,
+            }
+            if payload.tools:
+                create_kwargs["tools"] = payload.tools
             return await client.messages.create(**create_kwargs)
         except anthropic.RateLimitError:
             if attempt == max_retries - 1:
@@ -156,10 +175,12 @@ async def paced_claude_call(
     max_tokens: int,
     messages: list,
     tools: list | None = None,
+    allow_binary: bool = False,
 ) -> anthropic.types.Message:
     """Call Claude with adaptive concurrency limiting.
 
     Automatically backs off on rate limits and ramps up on sustained success.
+    All outgoing payloads are routed through the PHI boundary.
     """
     limiter = get_limiter()
     await limiter.acquire()
@@ -170,6 +191,7 @@ async def paced_claude_call(
             max_tokens=max_tokens,
             messages=messages,
             tools=tools,
+            allow_binary=allow_binary,
         )
         await limiter.on_success()
         return result
