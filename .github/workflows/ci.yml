@@ -39,6 +39,9 @@ jobs:
           pip install -r backend/requirements.txt
           pip install pytest pytest-asyncio pytest-cov ruff
 
+      - name: PHI boundary check
+        run: bash scripts/check-phi-boundary.sh
+
       - name: Lint
         run: ruff check backend/
 

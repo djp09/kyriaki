@@ -143,11 +143,18 @@ async def extract_from_document(
         # Bypass the adaptive concurrency limiter — this is a user-facing
         # upload, not a batch analysis call. The limiter is shared with the
         # matching agent and can block uploads when agents are running.
+        #
+        # allow_binary=True: the user explicitly uploaded this document. Its
+        # binary payload (image/PDF) cannot be text-scrubbed. The text prompt
+        # is still de-identified by the PHI boundary. See ADR-004 — a local
+        # Stage-1 scrubber (Gemma) should eventually process these before
+        # they reach Claude.
         response = await call_claude_with_retry(
             get_claude_client(),
             model=settings.claude_model,
             max_tokens=2000,
             messages=[{"role": "user", "content": content_blocks}],
+            allow_binary=True,
         )
         tokens = _extract_token_usage(response)
         text = response.content[0].text.strip()

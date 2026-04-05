@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import DateTime, Float, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import DateTime, Float, ForeignKey, Index, Integer, LargeBinary, String, Text
 from sqlalchemy.dialects.postgresql import JSON, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -43,6 +43,13 @@ class PatientProfileDB(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
 
     version: Mapped[int] = mapped_column(Integer, default=1)
+
+    # At-rest encrypted copy of the full patient profile (ADR-004). Populated
+    # additively alongside the plaintext columns. Once all read paths migrate
+    # to this column, a follow-up migration drops the plaintext columns.
+    profile_encrypted: Mapped[Optional[bytes]] = mapped_column(LargeBinary, nullable=True)
+    encryption_key_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    profile_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
 
     match_sessions: Mapped[list[MatchSessionDB]] = relationship(back_populates="patient", cascade="all, delete-orphan")
 
@@ -282,6 +289,35 @@ class TrialCacheDB(Base):
 
 
 # --- Ground truth feedback ---
+
+
+class AuditLogDB(Base):
+    """Append-only, hash-chained audit log for PHI access (ADR-004 / ADR-005).
+
+    Every read/write/export of patient data emits one row. ``row_hash`` is a
+    SHA-256 of ``prev_hash`` concatenated with the canonical serialisation
+    of this row's fields, linking each entry to its predecessor so tampering
+    is detectable by replaying the chain with ``scripts/verify-audit-chain.py``.
+    """
+
+    __tablename__ = "audit_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    actor: Mapped[str] = mapped_column(String(256), nullable=False)
+    action: Mapped[str] = mapped_column(String(64), nullable=False)
+    resource_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    resource_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    purpose: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    meta: Mapped[Optional[dict]] = mapped_column("metadata", JSON, nullable=True)
+    prev_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    row_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    __table_args__ = (
+        Index("ix_audit_occurred_at", "occurred_at"),
+        Index("ix_audit_actor", "actor"),
+        Index("ix_audit_resource", "resource_type", "resource_id"),
+    )
 
 
 class TrialOutcomeDB(Base):
