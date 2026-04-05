@@ -1,0 +1,133 @@
+/* Override Radix theme defaults */
+.radix-themes {
+    --color-background: transparent !important;
+    --accent-indicator: transparent !important;
+}
+
+.radix-themes::before,
+.radix-themes::after {
+    display: none !important;
+}
+
+/* Reset headings so Tailwind classes take effect */
+h1, h2, h3, h4, h5, h6 {
+    font-size: inherit;
+    font-weight: inherit;
+    line-height: inherit;
+    margin: 0;
+}
+
+/* Base body */
+body {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+}
+
+/* Keyframe animations */
+@keyframes spin-ring {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+
+@keyframes spin-ring-reverse {
+    0% { transform: rotate(360deg); }
+    100% { transform: rotate(0deg); }
+}
+
+@keyframes progress-indeterminate {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(400%); }
+}
+
+@keyframes fade-in {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes pulse-dot {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+}
+
+@keyframes gradient-shift {
+    0% { background-position: 0% 50%; }
+    50% { background-position: 100% 50%; }
+    100% { background-position: 0% 50%; }
+}
+
+/* Spinner */
+.spinner-ring {
+    width: 64px;
+    height: 64px;
+    border: 3px solid transparent;
+    border-top-color: #8b5cf6;
+    border-radius: 50%;
+    animation: spin-ring 1.2s linear infinite;
+}
+
+.spinner-ring-2 {
+    position: absolute;
+    inset: 6px;
+    border: 3px solid transparent;
+    border-top-color: #ec4899;
+    border-radius: 50%;
+    animation: spin-ring-reverse 1.8s linear infinite;
+}
+
+.progress-indeterminate {
+    animation: progress-indeterminate 1.5s ease-in-out infinite;
+}
+
+.fade-in {
+    animation: fade-in 0.4s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+.agent-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #8b5cf6;
+    animation: pulse-dot 1.5s ease-in-out infinite;
+    flex-shrink: 0;
+}
+
+.header-gradient-bg {
+    background: linear-gradient(135deg, #09090b 0%, #1e1b2e 40%, #09090b 100%);
+    background-size: 200% 200%;
+    animation: gradient-shift 8s ease infinite;
+}
+
+.slide-in-right {
+    animation: fade-in 0.3s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+/* Fix select appearance */
+select.appearance-none {
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    appearance: none;
+}
+
+/* Focus visible only on keyboard nav */
+*:focus {
+    outline: none;
+}
+*:focus-visible {
+    outline: 2px solid #8b5cf6;
+    outline-offset: 2px;
+}
+
+/* Line clamp */
+.line-clamp-2 {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+.line-clamp-3 {
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
