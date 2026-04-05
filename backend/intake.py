@@ -11,8 +11,9 @@ PHI stays local: this never calls Claude.
 
 from __future__ import annotations
 
-from backend.gemma_client import get_gemma_client
 from pydantic import BaseModel, Field
+
+from gemma_client import get_gemma_client
 
 
 class NormalizedIntake(BaseModel):

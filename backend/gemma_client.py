@@ -169,7 +169,7 @@ def get_gemma_client() -> GemmaClient:
     if _client is not None:
         return _client
 
-    from backend.config import get_settings
+    from config import get_settings
 
     settings = get_settings()
     backend = settings.gemma_backend.lower()

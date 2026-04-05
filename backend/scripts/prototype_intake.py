@@ -11,8 +11,8 @@ from __future__ import annotations
 import asyncio
 import time
 
-from backend.gemma_client import GemmaSchemaError
-from backend.intake import normalize_intake
+from gemma_client import GemmaSchemaError
+from intake import normalize_intake
 
 SAMPLE_INPUTS: list[tuple[str, str, dict]] = [
     (

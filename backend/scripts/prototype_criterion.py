@@ -9,8 +9,8 @@ from __future__ import annotations
 import asyncio
 import time
 
-from backend.criterion_extraction import extract_criteria
-from backend.gemma_client import GemmaSchemaError
+from criterion_extraction import extract_criteria
+from gemma_client import GemmaSchemaError
 
 # Real eligibility text samples from ClinicalTrials.gov
 SAMPLE_CRITERIA: list[tuple[str, str]] = [

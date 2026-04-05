@@ -14,10 +14,11 @@ import json
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from backend.criterion_extraction import Criterion, ExtractedCriteria, extract_criteria
-from backend.gemma_client import GemmaSchemaError, OllamaGemmaClient, reset_gemma_client
-from backend.intake import NormalizedIntake, normalize_intake
-from backend.semantic_recall import (
+
+from criterion_extraction import Criterion, ExtractedCriteria, extract_criteria
+from gemma_client import GemmaSchemaError, OllamaGemmaClient, reset_gemma_client
+from intake import NormalizedIntake, normalize_intake
+from semantic_recall import (
     _cosine_similarity,
     build_patient_summary,
     build_trial_summary,
@@ -64,7 +65,7 @@ class TestIntakeNormalization:
             lines_of_therapy=2,
             ecog_score=1,
         )
-        with patch("backend.intake.get_gemma_client", return_value=_mock_gemma(mock_result)):
+        with patch("intake.get_gemma_client", return_value=_mock_gemma(mock_result)):
             result = await normalize_intake(
                 "62F stage 4 lung cancer, EGFR positive, PD-L1 80%, was on Tagrisso then carbo/pem",
                 form_hints={"sex": "female", "age": 62},
@@ -83,7 +84,7 @@ class TestIntakeNormalization:
             prior_treatments=["AC-T"],
             lines_of_therapy=1,
         )
-        with patch("backend.intake.get_gemma_client", return_value=_mock_gemma(mock_result)):
+        with patch("intake.get_gemma_client", return_value=_mock_gemma(mock_result)):
             result = await normalize_intake("54F TNBC stage IIIB BRCA1+, had AC-T")
         assert result.cancer_type == "Triple-Negative Breast Cancer"
         assert result.prior_treatments == ["AC-T"]
@@ -97,7 +98,7 @@ class TestIntakeNormalization:
             prior_treatments=["Crizotinib", "Alectinib"],
             lines_of_therapy=2,
         )
-        with patch("backend.intake.get_gemma_client", return_value=_mock_gemma(mock_result)):
+        with patch("intake.get_gemma_client", return_value=_mock_gemma(mock_result)):
             result = await normalize_intake("ALK-positive lung cancer, took Xalkori then Alecensa")
         assert "ALK+" in result.biomarkers
         assert "Crizotinib" in result.prior_treatments
@@ -112,7 +113,7 @@ class TestIntakeNormalization:
             prior_treatments=["FOLFOX", "FOLFIRI/Bevacizumab"],
             lines_of_therapy=2,
         )
-        with patch("backend.intake.get_gemma_client", return_value=_mock_gemma(mock_result)):
+        with patch("intake.get_gemma_client", return_value=_mock_gemma(mock_result)):
             result = await normalize_intake("mCRC KRAS G12C, FOLFOX then FOLFIRI+bev")
         assert result.cancer_stage == "Stage IV"
 
@@ -124,7 +125,7 @@ class TestIntakeNormalization:
             ecog_score=None,
             normalization_notes="ECOG not stated numerically.",
         )
-        with patch("backend.intake.get_gemma_client", return_value=_mock_gemma(mock_result)):
+        with patch("intake.get_gemma_client", return_value=_mock_gemma(mock_result)):
             result = await normalize_intake("ovarian cancer BRCA2 mutation, gets tired easily")
         assert result.ecog_score is None
 
@@ -133,7 +134,7 @@ class TestIntakeNormalization:
         mock_result = NormalizedIntake(
             normalization_notes="No input provided.",
         )
-        with patch("backend.intake.get_gemma_client", return_value=_mock_gemma(mock_result)):
+        with patch("intake.get_gemma_client", return_value=_mock_gemma(mock_result)):
             result = await normalize_intake("", form_hints=None)
         assert result.cancer_type is None
 
@@ -141,7 +142,7 @@ class TestIntakeNormalization:
     async def test_form_hints_passed_to_prompt(self):
         mock_result = NormalizedIntake(cancer_type="Non-Small Cell Lung Carcinoma")
         mock_client = _mock_gemma(mock_result)
-        with patch("backend.intake.get_gemma_client", return_value=mock_client):
+        with patch("intake.get_gemma_client", return_value=mock_client):
             await normalize_intake("lung cancer", form_hints={"age": 55, "sex": "male"})
         call_args = mock_client.generate.call_args
         prompt = call_args[0][0]
@@ -152,7 +153,7 @@ class TestIntakeNormalization:
     async def test_schema_error_propagates(self):
         mock_client = AsyncMock(spec=OllamaGemmaClient)
         mock_client.generate.side_effect = GemmaSchemaError("bad json")
-        with patch("backend.intake.get_gemma_client", return_value=mock_client), pytest.raises(GemmaSchemaError):
+        with patch("intake.get_gemma_client", return_value=mock_client), pytest.raises(GemmaSchemaError):
             await normalize_intake("some input")
 
     @pytest.mark.asyncio
@@ -161,7 +162,7 @@ class TestIntakeNormalization:
             cancer_type="Non-Small Cell Lung Carcinoma",
             biomarkers=["EGFR+", "PD-L1 80%", "ALK-", "ROS1-"],
         )
-        with patch("backend.intake.get_gemma_client", return_value=_mock_gemma(mock_result)):
+        with patch("intake.get_gemma_client", return_value=_mock_gemma(mock_result)):
             result = await normalize_intake("NSCLC EGFR+, PD-L1 80%, ALK neg, ROS1 neg")
         assert len(result.biomarkers) == 4
 
@@ -174,7 +175,7 @@ class TestIntakeNormalization:
             prior_treatments=["Cyclophosphamide/Doxorubicin/Vincristine"],
             lines_of_therapy=1,
         )
-        with patch("backend.intake.get_gemma_client", return_value=_mock_gemma(mock_result)):
+        with patch("intake.get_gemma_client", return_value=_mock_gemma(mock_result)):
             result = await normalize_intake("3yo with neuroblastoma stage 4 MYCN amplified, had chemo")
         assert result.cancer_type == "Neuroblastoma"
 
@@ -196,7 +197,7 @@ class TestCriterionExtraction:
                 Criterion(type="exclusion", text="Active brain metastases", category="disease_status"),
             ]
         )
-        with patch("backend.criterion_extraction.get_gemma_client", return_value=_mock_gemma(mock_result)):
+        with patch("criterion_extraction.get_gemma_client", return_value=_mock_gemma(mock_result)):
             result = await extract_criteria("Inclusion:\n1. Age >= 18\n2. ECOG 0-1\nExclusion:\n1. Active brain mets")
         assert len(result.criteria) == 3
         inc = [c for c in result.criteria if c.type == "inclusion"]
@@ -218,7 +219,7 @@ class TestCriterionExtraction:
                 Criterion(type="inclusion", text="Histologically confirmed NSCLC", category="diagnosis"),
             ]
         )
-        with patch("backend.criterion_extraction.get_gemma_client", return_value=_mock_gemma(mock_result)):
+        with patch("criterion_extraction.get_gemma_client", return_value=_mock_gemma(mock_result)):
             result = await extract_criteria("Age >= 18 with histologically confirmed NSCLC")
         assert len(result.criteria) == 2
 
@@ -231,7 +232,7 @@ class TestCriterionExtraction:
                 Criterion(type="inclusion", text="Hemoglobin >= 9.0 g/dL", category="labs"),
             ]
         )
-        with patch("backend.criterion_extraction.get_gemma_client", return_value=_mock_gemma(mock_result)):
+        with patch("criterion_extraction.get_gemma_client", return_value=_mock_gemma(mock_result)):
             result = await extract_criteria("Adequate organ function: ANC >= 1500, Plt >= 100k, Hgb >= 9")
         assert all(c.category == "labs" for c in result.criteria)
 
@@ -254,7 +255,7 @@ class TestCriterionExtraction:
         mock_result = ExtractedCriteria(
             criteria=[Criterion(type="inclusion", text="test", category=cat) for cat in valid_categories]
         )
-        with patch("backend.criterion_extraction.get_gemma_client", return_value=_mock_gemma(mock_result)):
+        with patch("criterion_extraction.get_gemma_client", return_value=_mock_gemma(mock_result)):
             result = await extract_criteria("test text")
         for c in result.criteria:
             assert c.category in valid_categories
@@ -342,7 +343,7 @@ class TestSemanticRecall:
         ]
         patient = {"cancer_type": "NSCLC"}
 
-        with patch("backend.semantic_recall.get_gemma_client", return_value=mock_client):
+        with patch("semantic_recall.get_gemma_client", return_value=mock_client):
             results = await rank_trials_by_similarity(patient, trials, top_n=2)
 
         assert len(results) == 2
@@ -359,7 +360,7 @@ class TestSemanticRecall:
         trials = [{"brief_title": f"Trial {i}"} for i in range(5)]
         patient = {"cancer_type": "test"}
 
-        with patch("backend.semantic_recall.get_gemma_client", return_value=mock_client):
+        with patch("semantic_recall.get_gemma_client", return_value=mock_client):
             results = await rank_trials_by_similarity(patient, trials, top_n=2)
 
         assert len(results) == 2

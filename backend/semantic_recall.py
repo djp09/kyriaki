@@ -13,7 +13,7 @@ from __future__ import annotations
 import hashlib
 import math
 
-from backend.gemma_client import get_gemma_client
+from gemma_client import get_gemma_client
 
 
 def _cosine_similarity(a: list[float], b: list[float]) -> float:
