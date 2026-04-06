@@ -58,7 +58,7 @@ class OllamaGemmaClient(GemmaClient):
     def __init__(
         self,
         host: str = "http://localhost:11434",
-        generate_model: str = "gemma3:12b",
+        generate_model: str = "gemma4",
         embed_model: str = "nomic-embed-text",
         timeout: float = 120.0,
     ):

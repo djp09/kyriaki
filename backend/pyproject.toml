@@ -28,3 +28,8 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["."]
+markers = [
+    "ollama: requires running Ollama instance with Gemma model",
+    "live_claude: requires Anthropic API key for live Claude calls",
+    "slow: long-running tests (full pipeline, >60s)",
+]
