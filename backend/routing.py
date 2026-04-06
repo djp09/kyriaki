@@ -130,7 +130,10 @@ def classify_patient(patient: PatientProfile) -> RouteConfig:
     is_rare = any(rare in cancer_lower for rare in RARE_CANCERS)
     is_common = any(common in cancer_lower for common in COMMON_CANCERS)
     high_therapy_lines = patient.lines_of_therapy >= 3
-    many_biomarkers = len(patient.biomarkers) >= 5
+    # Don't penalize thorough molecular profiling — a well-characterized common
+    # cancer (EGFR+, ALK-, ROS1-, KRAS wt, PD-L1 35%) is SIMPLER to match,
+    # not harder. Only flag as complex if biomarkers suggest basket/rare-target.
+    many_biomarkers = len(patient.biomarkers) >= 5 and not is_common
 
     # Determine category
     if is_pediatric:

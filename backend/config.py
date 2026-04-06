@@ -44,8 +44,8 @@ class Settings(BaseSettings):
 
     # Matching engine
     match_timeout: int = 180
-    max_concurrent_analyses: int = 5
-    inter_call_delay: float = 0.3
+    max_concurrent_analyses: int = 10
+    inter_call_delay: float = 0.1
     max_retries: int = 3
     default_page_size: int = 10
 
@@ -64,7 +64,8 @@ class Settings(BaseSettings):
     # Gemma pipeline stage flags — enable individually for gradual rollout
     gemma_stage1_enabled: bool = True  # intake normalization (one call, ~12s local)
     gemma_stage3_enabled: bool = True  # semantic recall embeddings (one batch call)
-    gemma_stage4_enabled: bool = False  # criterion extraction cache lookup (nightly sync only for now)
+    gemma_stage4_enabled: bool = True  # criterion extraction for cache-warming (100% recall vs 87% rule-based)
+    gemma_stage5_enabled: bool = False  # eligibility reasoning — Gemma 4 too slow on local GPU (~45s/trial)
     # Vertex AI (unused until prod wiring)
     vertex_project: str = ""
     vertex_location: str = "us-central1"
