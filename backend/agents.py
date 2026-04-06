@@ -1033,9 +1033,13 @@ class MatchingAgent(BaseAgent):
             elig_hash = text_hash(eligibility_text)
 
             async with async_session() as session:
-                stmt = select(StructuredCriteriaDB.criteria_json).where(
-                    StructuredCriteriaDB.eligibility_text_hash == elig_hash,
-                ).limit(1)
+                stmt = (
+                    select(StructuredCriteriaDB.criteria_json)
+                    .where(
+                        StructuredCriteriaDB.eligibility_text_hash == elig_hash,
+                    )
+                    .limit(1)
+                )
                 result = await session.execute(stmt)
                 row = result.scalar_one_or_none()
 

@@ -197,32 +197,38 @@ def _extract_judgeable_matches(task: dict) -> list[dict]:
         exc_evals = m.get("exclusion_evaluations", [])
         all_evals = []
         for i, e in enumerate(inc_evals):
-            all_evals.append({
-                "criterion_id": f"I{i + 1}",
-                "type": "inclusion",
-                "category": e.get("category", "other"),
-                "status": e.get("status", "INSUFFICIENT_INFO"),
-                "confidence": e.get("confidence", "MEDIUM"),
-                "criterion_text": e.get("criterion", ""),
-                "reasoning": e.get("explanation", ""),
-            })
+            all_evals.append(
+                {
+                    "criterion_id": f"I{i + 1}",
+                    "type": "inclusion",
+                    "category": e.get("category", "other"),
+                    "status": e.get("status", "INSUFFICIENT_INFO"),
+                    "confidence": e.get("confidence", "MEDIUM"),
+                    "criterion_text": e.get("criterion", ""),
+                    "reasoning": e.get("explanation", ""),
+                }
+            )
         for i, e in enumerate(exc_evals):
-            all_evals.append({
-                "criterion_id": f"E{i + 1}",
-                "type": "exclusion",
-                "category": e.get("category", "other"),
-                "status": e.get("status", "INSUFFICIENT_INFO"),
-                "confidence": e.get("confidence", "MEDIUM"),
-                "criterion_text": e.get("criterion", ""),
-                "reasoning": e.get("explanation", ""),
-            })
+            all_evals.append(
+                {
+                    "criterion_id": f"E{i + 1}",
+                    "type": "exclusion",
+                    "category": e.get("category", "other"),
+                    "status": e.get("status", "INSUFFICIENT_INFO"),
+                    "confidence": e.get("confidence", "MEDIUM"),
+                    "criterion_text": e.get("criterion", ""),
+                    "reasoning": e.get("explanation", ""),
+                }
+            )
         if explanation and all_evals:
-            judgeable.append({
-                "nct_id": m.get("nct_id", "?"),
-                "match_score": m.get("match_score", 0),
-                "explanation": explanation,
-                "evaluations": all_evals,
-            })
+            judgeable.append(
+                {
+                    "nct_id": m.get("nct_id", "?"),
+                    "match_score": m.get("match_score", 0),
+                    "explanation": explanation,
+                    "evaluations": all_evals,
+                }
+            )
     return judgeable
 
 
@@ -233,9 +239,7 @@ class TestLiveFaithfulness:
     @pytest.fixture(scope="class")
     def match_task(self):
         """Run one match against the live backend (shared across tests)."""
-        return asyncio.get_event_loop().run_until_complete(
-            _run_match_and_wait(LIVE_PATIENT)
-        )
+        return asyncio.get_event_loop().run_until_complete(_run_match_and_wait(LIVE_PATIENT))
 
     @pytest.fixture(scope="class")
     def judgeable_matches(self, match_task):
@@ -246,6 +250,7 @@ class TestLiveFaithfulness:
     @pytest.fixture(scope="class")
     def judge_results(self, judgeable_matches):
         """Run Opus judge on each match (expensive — cached at class scope)."""
+
         async def _judge_all():
             results = []
             for m in judgeable_matches:
@@ -263,10 +268,7 @@ class TestLiveFaithfulness:
         valid = [r for r in judge_results if not r.get("parse_error")]
         assert len(valid) > 0, "All judge calls failed to parse"
         # Allow up to 1 parse failure — LLM output is occasionally malformed
-        assert len(parse_errors) <= 1, (
-            f"{len(parse_errors)} parse errors: "
-            f"{[r.get('nct_id') for r in parse_errors]}"
-        )
+        assert len(parse_errors) <= 1, f"{len(parse_errors)} parse errors: {[r.get('nct_id') for r in parse_errors]}"
         for r in valid:
             assert "claims" in r, f"Missing claims for {r.get('nct_id')}"
             assert "total_claims" in r
@@ -282,8 +284,7 @@ class TestLiveFaithfulness:
             pytest.skip("No claims to evaluate")
         if total_claims < 10:
             pytest.skip(
-                f"Too few claims ({total_claims}) for reliable gate — "
-                f"need at least 10. Try increasing max_results."
+                f"Too few claims ({total_claims}) for reliable gate — need at least 10. Try increasing max_results."
             )
 
         rate = total_unsupported / total_claims
@@ -303,12 +304,9 @@ class TestLiveFaithfulness:
             if unsup > 0:
                 for c in r.get("claims", []):
                     if c.get("verdict") == "UNSUPPORTED":
-                        print(f"      - \"{c['claim_text']}\" → {c['reason']}")
+                        print(f'      - "{c["claim_text"]}" → {c["reason"]}')
 
-        assert rate < 0.02, (
-            f"Unsupported claim rate {rate:.1%} exceeds 2% gate "
-            f"({total_unsupported}/{total_claims})"
-        )
+        assert rate < 0.02, f"Unsupported claim rate {rate:.1%} exceeds 2% gate ({total_unsupported}/{total_claims})"
 
     def test_no_match_has_majority_unsupported(self, judge_results):
         """No single match should have > 50% unsupported claims."""
@@ -317,7 +315,4 @@ class TestLiveFaithfulness:
             unsupported = r["unsupported_count"]
             if total > 0:
                 rate = unsupported / total
-                assert rate <= 0.5, (
-                    f"{r.get('nct_id')}: {rate:.0%} unsupported "
-                    f"({unsupported}/{total})"
-                )
+                assert rate <= 0.5, f"{r.get('nct_id')}: {rate:.0%} unsupported ({unsupported}/{total})"

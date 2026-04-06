@@ -216,9 +216,7 @@ async def extract_criteria_for_trial(
 
     # Skip if already extracted for this exact text
     existing = await session.execute(
-        select(StructuredCriteriaDB.id).where(
-            StructuredCriteriaDB.eligibility_text_hash == elig_hash
-        )
+        select(StructuredCriteriaDB.id).where(StructuredCriteriaDB.eligibility_text_hash == elig_hash)
     )
     if existing.scalar_one_or_none() is not None:
         return False
@@ -226,11 +224,13 @@ async def extract_criteria_for_trial(
     try:
         result = await extract_criteria(eligibility_text)
         criteria_dicts = [c.model_dump() for c in result.criteria]
-        session.add(StructuredCriteriaDB(
-            nct_id=nct_id,
-            eligibility_text_hash=elig_hash,
-            criteria_json=criteria_dicts,
-        ))
+        session.add(
+            StructuredCriteriaDB(
+                nct_id=nct_id,
+                eligibility_text_hash=elig_hash,
+                criteria_json=criteria_dicts,
+            )
+        )
         await session.flush()
         return True
     except Exception as e:
