@@ -8,7 +8,12 @@ class NavigationState(rx.State):
     active_agent: str = ""
 
     @rx.event
-    def set_view(self, new_view: str):
+    async def set_view(self, new_view: str):
+        if self.view == "loading" and new_view != "loading":
+            from .match_state import MatchState
+            match = await self.get_state(MatchState)
+            match.match_task_id = ""
+            match.is_loading = False
         self.previous_view = self.view
         self.view = new_view
 

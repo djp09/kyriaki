@@ -4,6 +4,10 @@ BASE_URL = "http://localhost:8000/api"
 TIMEOUT = 30.0
 
 
+class NotFoundError(Exception):
+    pass
+
+
 async def _request(method: str, path: str, **kwargs) -> dict:
     async with httpx.AsyncClient(base_url=BASE_URL, timeout=TIMEOUT) as client:
         resp = await client.request(method, path, **kwargs)
@@ -26,6 +30,8 @@ async def _request(method: str, path: str, **kwargs) -> dict:
                     detail = str(detail)
             except Exception:
                 pass
+            if resp.status_code == 404:
+                raise NotFoundError(detail or "Not found.")
             raise Exception(detail or f"Request failed ({resp.status_code}).")
         return resp.json()
 

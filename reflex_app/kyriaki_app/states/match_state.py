@@ -29,6 +29,21 @@ class MatchState(rx.State):
     loading_message: str = FALLBACK_MESSAGES[0]
     is_loading: bool = False
     fallback_messages: list[str] = FALLBACK_MESSAGES
+    show_excluded: bool = False
+
+    @rx.event
+    def toggle_excluded(self):
+        self.show_excluded = not self.show_excluded
+
+    @rx.var
+    def visible_matches(self) -> list[dict[str, str]]:
+        if self.show_excluded:
+            return self.results_matches
+        return [m for m in self.results_matches if int(m.get("match_score", 0)) > 0]
+
+    @rx.var
+    def excluded_count(self) -> int:
+        return sum(1 for m in self.results_matches if int(m.get("match_score", 0)) == 0)
 
     def _reset_state(self):
         self.match_task_id = ""
@@ -39,6 +54,7 @@ class MatchState(rx.State):
         self.fallback_msg_index = 0
         self.loading_message = FALLBACK_MESSAGES[0]
         self.is_loading = False
+        self.show_excluded = False
 
     @rx.event
     async def start_match(self, patient: dict):
@@ -86,7 +102,18 @@ class MatchState(rx.State):
             try:
                 from ..api_client import get_task
                 task = await get_task(task_id)
-            except Exception:
+            except Exception as exc:
+                from ..api_client import NotFoundError
+                if isinstance(exc, NotFoundError):
+                    async with self:
+                        from .navigation_state import NavigationState
+                        nav = await self.get_state(NavigationState)
+                        nav.error_message = "Task expired. Please start a new search."
+                        nav.view = nav.previous_view
+                        nav.active_agent = ""
+                        self.match_task_id = ""
+                        self.is_loading = False
+                    return
                 await asyncio.sleep(4)
                 continue
             async with self:

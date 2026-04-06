@@ -256,7 +256,7 @@ def trial_results() -> rx.Component:
                     class_name="text-sm text-zinc-500",
                 ),
                 rx.el.span(
-                    MatchState.results_matches.length().to_string() + " matches",
+                    MatchState.visible_matches.length().to_string() + " matches",
                     class_name="text-sm font-medium text-violet-600",
                 ),
                 class_name="flex items-center gap-3",
@@ -264,19 +264,49 @@ def trial_results() -> rx.Component:
             class_name="mb-4",
         ),
         rx.cond(
-            MatchState.results_matches.length() > 0,
+            MatchState.visible_matches.length() > 0,
             rx.el.div(
-                rx.foreach(MatchState.results_matches, trial_card),
+                rx.foreach(MatchState.visible_matches, trial_card),
+                rx.cond(
+                    MatchState.excluded_count > 0,
+                    rx.el.button(
+                        rx.cond(
+                            MatchState.show_excluded,
+                            "Hide excluded trials",
+                            "Show " + MatchState.excluded_count.to_string() + " excluded trials",
+                        ),
+                        on_click=MatchState.toggle_excluded,
+                        class_name="text-xs text-zinc-400 hover:text-zinc-600 font-medium mt-4 mx-auto block transition-colors",
+                    ),
+                    rx.fragment(),
+                ),
                 class_name="flex flex-col gap-3",
             ),
-            rx.el.div(
-                rx.icon("search-x", class_name="h-10 w-10 text-zinc-300 mx-auto"),
-                rx.el.p("No matches found", class_name="text-base font-medium text-zinc-600 mt-3"),
-                rx.el.p(
-                    "Try broadening your search criteria or increasing your travel distance.",
-                    class_name="text-sm text-zinc-400 mt-1",
+            rx.cond(
+                MatchState.excluded_count > 0,
+                rx.el.div(
+                    rx.icon("search-x", class_name="h-10 w-10 text-zinc-300 mx-auto"),
+                    rx.el.p("No eligible matches found", class_name="text-base font-medium text-zinc-600 mt-3"),
+                    rx.el.p(
+                        "All screened trials were excluded.",
+                        class_name="text-sm text-zinc-400 mt-1",
+                    ),
+                    rx.el.button(
+                        "Show " + MatchState.excluded_count.to_string() + " excluded trials",
+                        on_click=MatchState.toggle_excluded,
+                        class_name="text-xs text-violet-600 hover:text-violet-700 font-medium mt-3 transition-colors",
+                    ),
+                    class_name="text-center py-12",
                 ),
-                class_name="text-center py-12",
+                rx.el.div(
+                    rx.icon("search-x", class_name="h-10 w-10 text-zinc-300 mx-auto"),
+                    rx.el.p("No matches found", class_name="text-base font-medium text-zinc-600 mt-3"),
+                    rx.el.p(
+                        "Try broadening your search criteria or increasing your travel distance.",
+                        class_name="text-sm text-zinc-400 mt-1",
+                    ),
+                    class_name="text-center py-12",
+                ),
             ),
         ),
         rx.el.p(

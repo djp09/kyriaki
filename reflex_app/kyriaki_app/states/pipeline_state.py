@@ -378,7 +378,15 @@ class PipelineState(rx.State):
             try:
                 from ..api_client import get_task
                 task = await get_task(task_id)
-            except Exception:
+            except Exception as exc:
+                from ..api_client import NotFoundError
+                if isinstance(exc, NotFoundError):
+                    async with self:
+                        self._update_pipeline(nct_id, {"dossier_status": "error", "dossier_task_id": ""})
+                        from .navigation_state import NavigationState
+                        nav = await self.get_state(NavigationState)
+                        nav.active_agent = ""
+                    return
                 continue
             async with self:
                 status = task.get("status", "")
@@ -462,7 +470,15 @@ class PipelineState(rx.State):
             try:
                 from ..api_client import get_task
                 task = await get_task(task_id)
-            except Exception:
+            except Exception as exc:
+                from ..api_client import NotFoundError
+                if isinstance(exc, NotFoundError):
+                    async with self:
+                        self._update_pipeline(nct_id, {"enrollment_status": "error", "enrollment_task_id": ""})
+                        from .navigation_state import NavigationState
+                        nav = await self.get_state(NavigationState)
+                        nav.active_agent = ""
+                    return
                 continue
             async with self:
                 status = task.get("status", "")
@@ -534,7 +550,15 @@ class PipelineState(rx.State):
             try:
                 from ..api_client import get_task
                 task = await get_task(task_id)
-            except Exception:
+            except Exception as exc:
+                from ..api_client import NotFoundError
+                if isinstance(exc, NotFoundError):
+                    async with self:
+                        self._update_pipeline(nct_id, {"outreach_status": "error", "outreach_task_id": ""})
+                        from .navigation_state import NavigationState
+                        nav = await self.get_state(NavigationState)
+                        nav.active_agent = ""
+                    return
                 continue
             async with self:
                 status = task.get("status", "")
