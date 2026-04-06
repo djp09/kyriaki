@@ -1024,10 +1024,11 @@ class MatchingAgent(BaseAgent):
         if not settings.gemma_stage4_enabled:
             return None
         try:
+            from sqlalchemy import select
+
             from database import async_session
             from db_models import StructuredCriteriaDB
             from semantic_recall import text_hash
-            from sqlalchemy import select
 
             elig_hash = text_hash(eligibility_text)
 
