@@ -287,12 +287,12 @@ class TestLiveFaithfulness:
             )
 
         rate = total_unsupported / total_claims
-        print(f"\n  Faithfulness results:")
+        print("\n  Faithfulness results:")
         print(f"    Total matches judged: {len(judge_results)}")
         print(f"    Total claims: {total_claims}")
         print(f"    Unsupported claims: {total_unsupported}")
         print(f"    Unsupported claim rate: {rate:.1%}")
-        print(f"    Gate threshold: < 2%")
+        print("    Gate threshold: < 2%")
 
         for r in judge_results:
             nct = r.get("nct_id", "?")
