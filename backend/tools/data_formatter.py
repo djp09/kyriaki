@@ -33,7 +33,7 @@ def build_scored_match(trial: dict, analysis: dict, patient: PatientProfile) -> 
             "status": e.get("status", "INSUFFICIENT_INFO"),
             "confidence": e.get("confidence", "MEDIUM"),
             "explanation": e.get("explanation", ""),
-            "patient_data_used": e.get("patient_data_used", []),
+            "patient_data_used": e.get("patient_data_used") or [],
         }
 
     return TrialMatch(

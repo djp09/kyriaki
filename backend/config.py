@@ -56,6 +56,20 @@ class Settings(BaseSettings):
     # Pipeline auto-chaining
     auto_chain_matching_to_dossier: bool = False  # If True, auto-dispatch dossier after matching completes
 
+    # Gemma (local LLM) — ADR-002 pipeline stages 1, 3, 4
+    gemma_backend: str = "ollama"  # "ollama" | "vertex"
+    ollama_host: str = "http://localhost:11434"
+    gemma_generate_model: str = "gemma3:12b"
+    gemma_embed_model: str = "nomic-embed-text"
+    # Gemma pipeline stage flags — enable individually for gradual rollout
+    gemma_stage1_enabled: bool = True  # intake normalization (one call, ~12s local)
+    gemma_stage3_enabled: bool = True  # semantic recall embeddings (one batch call)
+    gemma_stage4_enabled: bool = False  # criterion extraction cache lookup (nightly sync only for now)
+    # Vertex AI (unused until prod wiring)
+    vertex_project: str = ""
+    vertex_location: str = "us-central1"
+    vertex_endpoint_id: str = ""
+
     # Trials client
     cache_ttl: int = 300  # In-memory cache TTL (seconds)
     trial_cache_ttl_hours: int = 24  # DB cache TTL for nightly refresh
