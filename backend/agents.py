@@ -63,6 +63,10 @@ from tools.trial_search import fetch_trial_tool, search_and_merge_tool
 
 logger = get_logger("kyriaki.agents")
 
+# Gemma pipeline imports — lazy to avoid import errors when Ollama not running
+_intake_mod = None
+_recall_mod = None
+
 
 # --- Framework types ---
 
@@ -262,6 +266,10 @@ class MatchingAgent(BaseAgent):
         max_results = inputs.max_results
         settings = get_settings()
 
+        # Stage 1 (Gemma, local): normalize free-text intake before routing
+        if settings.gemma_stage1_enabled and patient.additional_notes:
+            patient = await self._normalize_intake(patient)
+
         # Route: classify patient complexity → configure budget and strategy
         route = classify_patient(patient)
 
@@ -337,6 +345,9 @@ class MatchingAgent(BaseAgent):
 
         pool = await self._do_search(patient)
         logger.info("matching.direct_search_complete", trials=len(pool))
+        # NOTE: no Stage 3 semantic ranking in direct pipeline — the API
+        # already returns results in relevance order. Re-ranking with
+        # shallow embeddings degrades that ordering.
 
         if emit:
             await emit("progress", {"step": "analyzing_trials", "iteration": 2, "reasoning": "Analyzing eligibility"})
@@ -477,6 +488,19 @@ class MatchingAgent(BaseAgent):
                         "criteria_total": 0,
                     }
 
+        # If pre-screen found very few HIGH candidates, force-analyze the top
+        # few anyway. The fast pre-screen can be overly aggressive for early-stage
+        # or uncommon cancer types, and a deeper criterion-level analysis may
+        # find partial matches the pre-screen missed.
+        MIN_DEEP_ANALYZE = 3
+        if len(high_tier_ids) < MIN_DEEP_ANALYZE:
+            # Add unanalyzed trials not already in high_tier_ids, preserving pool order
+            for nct_id in unanalyzed:
+                if nct_id not in high_tier_ids and nct_id not in analyses:
+                    high_tier_ids.append(nct_id)
+                if len(high_tier_ids) >= MIN_DEEP_ANALYZE:
+                    break
+
         if not high_tier_ids:
             return analyses
 
@@ -549,6 +573,9 @@ class MatchingAgent(BaseAgent):
         unanalyzed = {nct_id: trial for nct_id, trial in pool.items() if nct_id not in analyses}
         if not unanalyzed:
             return "No unanalyzed trials in pool", False
+
+        # Stage 3 (Gemma, local): re-rank unanalyzed trials by semantic similarity
+        unanalyzed = await self._semantic_rank(unanalyzed, patient, settings)
 
         # --- Tier 1: Fast pre-screen in a single call ---
         trials_list_lines = []
@@ -699,13 +726,19 @@ class MatchingAgent(BaseAgent):
         if len(eligibility_text) > 6000:
             eligibility_text = eligibility_text[:6000] + "\n\n[Eligibility text truncated]"
 
-        # Step 1: Parse criteria into structured list (rule-based, no API call)
-        parse_result = parse_eligibility_criteria(eligibility_text)
-        if not parse_result.success or parse_result.data["total_criteria"] == 0:
-            logger.warning("analysis.no_criteria_parsed", nct_id=nct_id)
-            return None
-
-        parsed = parse_result.data
+        # Step 1: Parse criteria into structured list
+        # Check for Gemma-extracted criteria (Stage 4, cached during nightly sync) first.
+        # Fall back to rule-based parser for real-time.
+        cached_criteria = await self._get_cached_criteria(nct_id, eligibility_text, settings)
+        if cached_criteria:
+            parsed = cached_criteria
+            logger.info("analysis.using_cached_gemma_criteria", nct_id=nct_id)
+        else:
+            parse_result = parse_eligibility_criteria(eligibility_text)
+            if not parse_result.success or parse_result.data["total_criteria"] == 0:
+                logger.warning("analysis.no_criteria_parsed", nct_id=nct_id)
+                return None
+            parsed = parse_result.data
 
         # Prioritize the most important criteria to keep prompts short.
         # High-priority categories determine eligibility; low-priority are
@@ -888,6 +921,119 @@ class MatchingAgent(BaseAgent):
         if not result.success:
             return self._fallback_summary(patient)
         return result.data
+
+    async def _normalize_intake(self, patient: PatientProfile) -> PatientProfile:
+        """Stage 1 (Gemma): normalize free-text intake notes into canonical fields.
+
+        Merges Gemma-inferred fields into the patient profile, preferring
+        form-provided values (ground truth) over Gemma-inferred ones.
+        Returns original patient on failure (no regression).
+        """
+        try:
+            from intake import normalize_intake
+
+            normalized = await normalize_intake(
+                patient.additional_notes or "",
+                form_hints={
+                    "cancer_type": patient.cancer_type,
+                    "cancer_stage": patient.cancer_stage,
+                    "age": patient.age,
+                    "sex": patient.sex,
+                },
+            )
+            logger.info(
+                "matching.stage1_normalized",
+                cancer_type=normalized.cancer_type,
+                biomarkers=len(normalized.biomarkers),
+            )
+            return self._merge_normalized(patient, normalized)
+        except Exception as e:
+            logger.warning("matching.stage1_failed", error=str(e))
+            return patient
+
+    def _merge_normalized(self, patient: PatientProfile, normalized) -> PatientProfile:
+        """Merge Gemma-normalized fields into patient, keeping form values as ground truth."""
+        updates = {}
+        # Only override if the normalized value is non-empty and the form value is generic/empty
+        if normalized.cancer_type and not patient.cancer_type:
+            updates["cancer_type"] = normalized.cancer_type
+        if normalized.cancer_stage and not patient.cancer_stage:
+            updates["cancer_stage"] = normalized.cancer_stage
+        # Biomarkers and treatments: merge (union) — Gemma may extract from free-text notes
+        if normalized.biomarkers:
+            existing = set(patient.biomarkers)
+            new_markers = [b for b in normalized.biomarkers if b not in existing]
+            if new_markers:
+                updates["biomarkers"] = patient.biomarkers + new_markers
+        if normalized.prior_treatments:
+            existing = set(patient.prior_treatments)
+            new_treatments = [t for t in normalized.prior_treatments if t not in existing]
+            if new_treatments:
+                updates["prior_treatments"] = patient.prior_treatments + new_treatments
+                updates["lines_of_therapy"] = max(patient.lines_of_therapy, normalized.lines_of_therapy)
+        if normalized.ecog_score is not None and patient.ecog_score is None:
+            updates["ecog_score"] = normalized.ecog_score
+        if normalized.additional_conditions:
+            existing = set(patient.additional_conditions)
+            new_conds = [c for c in normalized.additional_conditions if c not in existing]
+            if new_conds:
+                updates["additional_conditions"] = patient.additional_conditions + new_conds
+
+        if updates:
+            return patient.model_copy(update=updates)
+        return patient
+
+    async def _semantic_rank(self, pool: dict, patient: PatientProfile, settings) -> dict:
+        """Stage 3 (Gemma): re-rank trial pool by semantic similarity to patient.
+
+        Only runs when enabled and pool is large enough to benefit from
+        re-ranking. For small pools (<50), the API's native relevance
+        ordering is usually better than shallow embedding similarity.
+        Returns pool unchanged on failure (no regression).
+        """
+        if not settings.gemma_stage3_enabled or len(pool) < 50:
+            return pool
+        try:
+            from semantic_recall import rank_trials_by_similarity
+
+            trials_list = list(pool.values())
+            patient_dict = patient.model_dump()
+            ranked = await rank_trials_by_similarity(patient_dict, trials_list, top_n=len(trials_list))
+            # Rebuild dict in ranked order
+            ranked_pool = {}
+            for trial, score in ranked:
+                nct_id = trial["nct_id"]
+                trial["_semantic_score"] = score
+                ranked_pool[nct_id] = trial
+            logger.info(
+                "matching.stage3_ranked",
+                pool_size=len(ranked_pool),
+                top_score=ranked[0][1] if ranked else 0,
+            )
+            return ranked_pool
+        except Exception as e:
+            logger.warning("matching.stage3_failed", error=str(e))
+            return pool
+
+    async def _get_cached_criteria(self, nct_id: str, eligibility_text: str, settings) -> dict | None:
+        """Stage 4: check for Gemma-extracted criteria cached during nightly sync.
+
+        Returns parsed criteria dict (same shape as parse_eligibility_criteria output)
+        or None if cache miss or disabled.
+        """
+        if not settings.gemma_stage4_enabled:
+            return None
+        try:
+            from semantic_recall import text_hash
+
+            _hash = text_hash(eligibility_text)  # noqa: F841 — will be used when DB query is wired
+            # TODO: query trial_cache DB for structured_criteria where
+            # eligibility_text_hash == _hash. For now, return None
+            # until nightly sync populates the cache.
+            return None
+        except Exception as e:
+            logger.warning("matching.stage4_cache_failed", error=str(e), nct_id=nct_id)
+            return None
 
     def _fallback_summary(self, patient: PatientProfile) -> str:
         treatments_str = ", ".join(patient.prior_treatments) if patient.prior_treatments else None

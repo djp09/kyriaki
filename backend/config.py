@@ -61,6 +61,10 @@ class Settings(BaseSettings):
     ollama_host: str = "http://localhost:11434"
     gemma_generate_model: str = "gemma3:12b"
     gemma_embed_model: str = "nomic-embed-text"
+    # Gemma pipeline stage flags — enable individually for gradual rollout
+    gemma_stage1_enabled: bool = True  # intake normalization (one call, ~12s local)
+    gemma_stage3_enabled: bool = True  # semantic recall embeddings (one batch call)
+    gemma_stage4_enabled: bool = False  # criterion extraction cache lookup (nightly sync only for now)
     # Vertex AI (unused until prod wiring)
     vertex_project: str = ""
     vertex_location: str = "us-central1"

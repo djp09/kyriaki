@@ -415,3 +415,144 @@ class TestGemmaClient:
             pytest.raises(GemmaSchemaError),
         ):
             await client.generate("test", schema=NormalizedIntake, max_retries=1)
+
+
+# ──────────────────────────────────────────────────────────────
+# Pipeline integration — MatchingAgent helper methods
+# ──────────────────────────────────────────────────────────────
+
+
+class TestMatchingAgentGemmaHelpers:
+    """Test the Gemma helper methods wired into MatchingAgent."""
+
+    def _make_patient(self, **overrides):
+        defaults = {
+            "cancer_type": "Non-Small Cell Lung Carcinoma",
+            "cancer_stage": "Stage IV",
+            "biomarkers": ["EGFR+"],
+            "prior_treatments": ["Osimertinib"],
+            "lines_of_therapy": 1,
+            "age": 62,
+            "sex": "female",
+            "location_zip": "94102",
+            "additional_notes": None,
+        }
+        defaults.update(overrides)
+        from models import PatientProfile
+
+        return PatientProfile(**defaults)
+
+    def _make_agent(self):
+        from agents import MatchingAgent
+
+        return MatchingAgent()
+
+    def test_merge_normalized_preserves_form_fields(self):
+        """Form-provided fields are ground truth — Gemma can't overwrite."""
+        agent = self._make_agent()
+        patient = self._make_patient(cancer_type="NSCLC")
+        normalized = NormalizedIntake(
+            cancer_type="Non-Small Cell Lung Carcinoma",  # Gemma has better name
+            biomarkers=["PD-L1 80%"],  # New biomarker from notes
+        )
+        result = agent._merge_normalized(patient, normalized)
+        # cancer_type keeps form value because it's non-empty
+        assert result.cancer_type == "NSCLC"
+        # biomarker is added (union)
+        assert "PD-L1 80%" in result.biomarkers
+        assert "EGFR+" in result.biomarkers
+
+    def test_merge_normalized_fills_empty_fields(self):
+        """Gemma fills in empty/missing fields."""
+        agent = self._make_agent()
+        patient = self._make_patient(cancer_type="", cancer_stage="", ecog_score=None)
+        normalized = NormalizedIntake(
+            cancer_type="Non-Small Cell Lung Carcinoma",
+            cancer_stage="Stage IV",
+            ecog_score=1,
+        )
+        result = agent._merge_normalized(patient, normalized)
+        assert result.cancer_type == "Non-Small Cell Lung Carcinoma"
+        assert result.cancer_stage == "Stage IV"
+        assert result.ecog_score == 1
+
+    def test_merge_normalized_no_duplicates(self):
+        """Merging doesn't create duplicate biomarkers or treatments."""
+        agent = self._make_agent()
+        patient = self._make_patient(biomarkers=["EGFR+"], prior_treatments=["Osimertinib"])
+        normalized = NormalizedIntake(
+            biomarkers=["EGFR+", "PD-L1 80%"],
+            prior_treatments=["Osimertinib", "Carboplatin/Pemetrexed"],
+            lines_of_therapy=2,
+        )
+        result = agent._merge_normalized(patient, normalized)
+        assert result.biomarkers == ["EGFR+", "PD-L1 80%"]
+        assert result.prior_treatments == ["Osimertinib", "Carboplatin/Pemetrexed"]
+
+    def test_merge_normalized_noop(self):
+        """When nothing to merge, returns same patient."""
+        agent = self._make_agent()
+        patient = self._make_patient()
+        normalized = NormalizedIntake()
+        result = agent._merge_normalized(patient, normalized)
+        assert result is patient
+
+    @pytest.mark.asyncio
+    async def test_normalize_intake_fallback_on_error(self):
+        """Stage 1 returns original patient on Gemma failure."""
+        agent = self._make_agent()
+        patient = self._make_patient(additional_notes="some notes")
+        with patch("intake.normalize_intake", side_effect=Exception("ollama down")):
+            result = await agent._normalize_intake(patient)
+        assert result is patient
+
+    @pytest.mark.asyncio
+    async def test_semantic_rank_disabled(self):
+        """Stage 3 returns pool unchanged when disabled."""
+        agent = self._make_agent()
+        patient = self._make_patient()
+        pool = {f"NCT{i:08d}": {"nct_id": f"NCT{i:08d}"} for i in range(60)}
+        from unittest.mock import MagicMock
+
+        settings = MagicMock()
+        settings.gemma_stage3_enabled = False
+        result = await agent._semantic_rank(pool, patient, settings)
+        assert result is pool
+
+    @pytest.mark.asyncio
+    async def test_semantic_rank_small_pool_skipped(self):
+        """Stage 3 skips ranking when pool < 50."""
+        agent = self._make_agent()
+        patient = self._make_patient()
+        pool = {f"NCT{i:08d}": {"nct_id": f"NCT{i:08d}"} for i in range(30)}
+        from unittest.mock import MagicMock
+
+        settings = MagicMock()
+        settings.gemma_stage3_enabled = True
+        result = await agent._semantic_rank(pool, patient, settings)
+        assert result is pool
+
+    @pytest.mark.asyncio
+    async def test_semantic_rank_fallback_on_error(self):
+        """Stage 3 returns pool unchanged on embedding failure."""
+        agent = self._make_agent()
+        patient = self._make_patient()
+        pool = {f"NCT{i:08d}": {"nct_id": f"NCT{i:08d}"} for i in range(60)}
+        from unittest.mock import MagicMock
+
+        settings = MagicMock()
+        settings.gemma_stage3_enabled = True
+        with patch("semantic_recall.rank_trials_by_similarity", side_effect=Exception("embed failed")):
+            result = await agent._semantic_rank(pool, patient, settings)
+        assert result is pool
+
+    @pytest.mark.asyncio
+    async def test_get_cached_criteria_disabled(self):
+        """Stage 4 returns None when disabled."""
+        agent = self._make_agent()
+        from unittest.mock import MagicMock
+
+        settings = MagicMock()
+        settings.gemma_stage4_enabled = False
+        result = await agent._get_cached_criteria("NCT123", "some text", settings)
+        assert result is None
