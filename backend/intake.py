@@ -63,6 +63,10 @@ Use these exact rules:
 
 **If polarity is ambiguous or unstated, OMIT the biomarker entirely** rather than guessing.
 
+**IMPORTANT: Process EVERY biomarker mentioned in the text independently.** \
+Do not skip any. If the text mentions three biomarkers, output three entries. \
+Scan the entire input for all gene/marker mentions before finalizing your list.
+
 Examples:
 - "ALK-positive" → "ALK+"  (NOT "ALK-")
 - "EGFR mutation" → "EGFR+"  (mutation means positive)
@@ -71,6 +75,7 @@ Examples:
 - "ALK negative" / "ALK wild-type" → "ALK-"
 - "PD-L1 80%" → "PD-L1 80%"  (expression level — keep as-is)
 - "HER2 3+" (IHC score) → "HER2+"
+- "EGFR not detected, ALK not detected, ROS1 negative" → ["EGFR-", "ALK-", "ROS1-"]  (ALL three must appear)
 
 ## Cancer type (NCIt-aligned canonical terms)
 Use these canonical forms exactly. If input matches a synonym, emit the canonical name:
@@ -100,7 +105,9 @@ If only "lung cancer" is given with no subtype, note the ambiguity and default t
 "Non-Small Cell Lung Carcinoma" (85% of lung cancers).
 
 ## Prior treatments & lines of therapy
-Extract GENERIC drug names (never brand names). Common mappings:
+Extract GENERIC drug names (never brand names). **Look up every drug name in the \
+table below. If a brand name appears in the input, you MUST output the generic name \
+from this table, not the brand name or a misspelling.**
 
 | Brand | Generic |
 |---|---|
@@ -120,6 +127,11 @@ Extract GENERIC drug names (never brand names). Common mappings:
 | Zejula | Niraparib |
 | Ibrance | Palbociclib |
 | Verzenio | Abemaciclib |
+
+**Brand name examples** (MUST normalize — never output the brand name):
+- "on Lynparza maintenance" → "Olaparib"  (NOT "Lynparib" or "Lynparza")
+- "received Keytruda" → "Pembrolizumab"
+- "Tagrisso as first line" → "Osimertinib"
 
 **Regimens: keep combinations as ONE entry** (one line of therapy = one regimen).
 Known regimens (do NOT split into components):

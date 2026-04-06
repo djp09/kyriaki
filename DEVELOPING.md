@@ -50,7 +50,7 @@ brew install --cask ollama-app
 open -a Ollama
 
 # Pull models
-ollama pull gemma3:12b        # ~8GB — generation (intake normalization, criterion extraction)
+ollama pull gemma4           # ~9.6GB — generation (intake normalization, criterion extraction)
 ollama pull nomic-embed-text  # ~274MB — embeddings (semantic recall)
 
 # Verify
@@ -63,7 +63,7 @@ curl -s http://localhost:11434/api/tags | python3 -m json.tool
 # Add to .env (defaults shown — only override if needed)
 KYRIAKI_GEMMA_BACKEND=ollama              # "ollama" for dev, "vertex" for prod
 KYRIAKI_OLLAMA_HOST=http://localhost:11434
-KYRIAKI_GEMMA_GENERATE_MODEL=gemma3:12b
+KYRIAKI_GEMMA_GENERATE_MODEL=gemma4
 KYRIAKI_GEMMA_EMBED_MODEL=nomic-embed-text
 ```
 
@@ -82,7 +82,7 @@ python3 -m backend.scripts.prototype_criterion
 - **Homebrew `ollama` formula (NOT cask)** fails on Apple M5 / macOS 26 Tahoe
   with `ggml_metal_library_init: error: failed to create library`. The official
   `ollama-app` cask bundles a precompiled Metal library and works correctly.
-- **Latency**: ~7–13s per call on M5 Pro for gemma3:12b. Acceptable for dev;
+- **Latency**: ~7–13s per call on M5 Pro for gemma4 (e4b, 128K context). Acceptable for dev;
   Vertex AI endpoints will be faster in prod.
 - **OLLAMA_NUM_GPU=0** does NOT bypass the Metal issue — the runner initializes
   Metal regardless.

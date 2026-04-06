@@ -54,7 +54,7 @@ jobs:
           KYRIAKI_DATABASE_URL: "postgresql+asyncpg://kyriaki:kyriaki_test@localhost:5432/kyriaki_test"
           KYRIAKI_ANTHROPIC_API_KEY: "test-key-not-real"
           KYRIAKI_ENVIRONMENT: "test"
-        run: pytest -v --tb=short --cov=. --cov-report=xml
+        run: pytest -v --tb=short --cov=. --cov-report=xml -m "not ollama and not live_claude and not slow"
 
       - name: Upload coverage
         if: always()

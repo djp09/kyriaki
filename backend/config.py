@@ -59,7 +59,7 @@ class Settings(BaseSettings):
     # Gemma (local LLM) — ADR-002 pipeline stages 1, 3, 4
     gemma_backend: str = "ollama"  # "ollama" | "vertex"
     ollama_host: str = "http://localhost:11434"
-    gemma_generate_model: str = "gemma3:12b"
+    gemma_generate_model: str = "gemma4"
     gemma_embed_model: str = "nomic-embed-text"
     # Gemma pipeline stage flags — enable individually for gradual rollout
     gemma_stage1_enabled: bool = True  # intake normalization (one call, ~12s local)
