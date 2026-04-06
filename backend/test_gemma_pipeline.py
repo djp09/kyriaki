@@ -556,3 +556,51 @@ class TestMatchingAgentGemmaHelpers:
         settings.gemma_stage4_enabled = False
         result = await agent._get_cached_criteria("NCT123", "some text", settings)
         assert result is None
+
+    def _get_agent_class(self):
+        from agents import MatchingAgent
+
+        return MatchingAgent
+
+    def test_biomarker_search_terms_egfr(self):
+        """EGFR+ should produce EGFR intervention search."""
+        cls = self._get_agent_class()
+        intr, term = cls._biomarker_search_terms(["EGFR L858R+"])
+        assert intr == "EGFR"
+        assert "EGFR" in term
+
+    def test_biomarker_search_terms_alk(self):
+        cls = self._get_agent_class()
+        intr, term = cls._biomarker_search_terms(["ALK+"])
+        assert intr == "ALK"
+
+    def test_biomarker_search_terms_brca(self):
+        """BRCA should search for PARP inhibitor."""
+        cls = self._get_agent_class()
+        intr, term = cls._biomarker_search_terms(["BRCA2 mutation"])
+        assert intr == "PARP inhibitor"
+
+    def test_biomarker_search_terms_msih(self):
+        """MSI-H should search for checkpoint inhibitor."""
+        cls = self._get_agent_class()
+        intr, term = cls._biomarker_search_terms(["MSI-H"])
+        assert intr == "checkpoint inhibitor"
+
+    def test_biomarker_search_terms_kras_g12c(self):
+        """KRAS G12C should use specific variant, not generic KRAS."""
+        cls = self._get_agent_class()
+        intr, term = cls._biomarker_search_terms(["KRAS G12C"])
+        assert intr == "KRAS G12C"
+
+    def test_biomarker_search_terms_none(self):
+        """No biomarkers → no search terms."""
+        cls = self._get_agent_class()
+        intr, term = cls._biomarker_search_terms([])
+        assert intr is None
+        assert term is None
+
+    def test_biomarker_search_terms_pdl1_only(self):
+        """PD-L1 alone shouldn't trigger intervention search (it's a selection criterion)."""
+        cls = self._get_agent_class()
+        intr, term = cls._biomarker_search_terms(["PD-L1 80%"])
+        assert intr is None

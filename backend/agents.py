@@ -352,7 +352,7 @@ class MatchingAgent(BaseAgent):
         if emit:
             await emit("progress", {"step": "analyzing_trials", "iteration": 2, "reasoning": "Analyzing eligibility"})
 
-        analyses = await self._do_prescreen_and_analyze(pool, patient, settings, biomarker_context, max_deep=5)
+        analyses = await self._do_prescreen_and_analyze(pool, patient, settings, biomarker_context, max_deep=10)
         logger.info("matching.direct_pipeline_complete", analyzed=len(analyses), pool=len(pool))
 
         return pool, analyses
@@ -410,7 +410,15 @@ class MatchingAgent(BaseAgent):
         return scratchpad.state.get("trials_pool", {}), scratchpad.state.get("analyses", {})
 
     async def _do_search(self, patient: PatientProfile) -> dict:
-        """Core search logic: query ClinicalTrials.gov + NCI, return deduplicated pool."""
+        """Core search logic: query ClinicalTrials.gov + NCI, return deduplicated pool.
+
+        Does two searches for patients with actionable biomarkers:
+        1. Broad cancer-type search (catches general trials)
+        2. Biomarker-targeted search (catches mutation-specific trials)
+        """
+        query_intr, query_term = self._biomarker_search_terms(patient.biomarkers)
+
+        # Always do the broad search
         result = await search_and_merge_tool(
             cancer_type=patient.cancer_type,
             age=patient.age,
@@ -418,14 +426,71 @@ class MatchingAgent(BaseAgent):
             page_size=20,
             include_nci=True,
         )
-        if not result.success:
-            logger.warning("matching.search_failed", error=result.error)
-            return {}
-
         pool = {}
-        for trial in result.data:
-            pool[trial["nct_id"]] = trial
+        if result.success:
+            for trial in result.data:
+                pool[trial["nct_id"]] = trial
+
+        # If patient has actionable biomarkers, do a targeted search too
+        if query_intr or query_term:
+            targeted = await search_and_merge_tool(
+                cancer_type=patient.cancer_type,
+                age=patient.age,
+                sex=patient.sex,
+                page_size=20,
+                query_intr=query_intr,
+                query_term=query_term,
+                include_nci=False,  # NCI already searched above
+            )
+            if targeted.success:
+                new_count = 0
+                for trial in targeted.data:
+                    if trial["nct_id"] not in pool:
+                        pool[trial["nct_id"]] = trial
+                        new_count += 1
+                if new_count:
+                    logger.info("matching.biomarker_search_added", new_trials=new_count, query_intr=query_intr)
+
+        if not pool:
+            logger.warning("matching.search_failed", error="No trials found")
+
         return pool
+
+    @staticmethod
+    def _biomarker_search_terms(biomarkers: list[str]) -> tuple[str | None, str | None]:
+        """Extract search terms from patient biomarkers for targeted trial search.
+
+        Returns (query_intr, query_term) for ClinicalTrials.gov API.
+        """
+        if not biomarkers:
+            return None, None
+
+        # Map biomarker patterns to intervention/term search strings
+        BIOMARKER_TO_INTERVENTION = {
+            "EGFR": "EGFR",
+            "ALK": "ALK",
+            "ROS1": "ROS1",
+            "BRAF": "BRAF",
+            "KRAS G12C": "KRAS G12C",
+            "KRAS": "KRAS",
+            "HER2": "HER2",
+            "BRCA": "PARP inhibitor",
+            "NTRK": "NTRK",
+            "RET": "RET",
+            "MET": "MET",
+            "FGFR": "FGFR",
+            "MSI-H": "checkpoint inhibitor",
+            "PD-L1": None,  # PD-L1 level is a selection criterion, not an intervention target
+        }
+
+        for biomarker in biomarkers:
+            # Strip polarity suffixes but keep hyphens within names (MSI-H)
+            bm_clean = biomarker.rstrip("+").rstrip("-").strip().upper()
+            for pattern, intervention in BIOMARKER_TO_INTERVENTION.items():
+                if pattern.upper() in bm_clean and intervention:
+                    return intervention, f"{pattern} mutation"
+
+        return None, None
 
     async def _do_prescreen_and_analyze(
         self,
@@ -759,7 +824,7 @@ class MatchingAgent(BaseAgent):
             criteria_lines.append(f"[{c['id']}] EXCLUSION ({c['category']}): {c['text']}")
         parsed_criteria_text = "\n".join(criteria_lines)
 
-        # Step 2: Evaluate each criterion with Claude
+        # Step 2: Evaluate each criterion with Gemma (local) or Claude (API)
         patient_vars = format_patient_for_prompt(patient)
         enriched = ""
         if biomarker_context:
@@ -790,6 +855,7 @@ class MatchingAgent(BaseAgent):
                     messages=[{"role": "user", "content": prompt_result.data}],
                 )
                 text = response.content[0].text.strip()
+
                 result = parse_json_response(text)
                 if result is None:
                     logger.warning("analysis.parse_failed", nct_id=nct_id, attempt=attempt + 1, text_preview=text[:200])
@@ -1016,17 +1082,22 @@ class MatchingAgent(BaseAgent):
             return pool
 
     async def _get_cached_criteria(self, nct_id: str, eligibility_text: str, settings) -> dict | None:
-        """Stage 4: check for Gemma-extracted criteria cached during nightly sync.
+        """Stage 4: look up Gemma-extracted criteria from DB cache.
 
         Returns parsed criteria dict (same shape as parse_eligibility_criteria output)
-        or None if cache miss or disabled.
+        or None if disabled, cache miss, or error. Falls back to rule-based parser.
+
+        NOTE: Gemma extraction is for cache-warming only (nightly sync), NOT
+        inline during real-time matching. Inline extraction adds ~15s per trial
+        which is unacceptable for user-facing latency. The rule-based parser
+        runs in <1ms as the real-time fallback.
         """
         if not settings.gemma_stage4_enabled:
             return None
         try:
             from semantic_recall import text_hash
 
-            _hash = text_hash(eligibility_text)  # noqa: F841 — will be used when DB query is wired
+            _hash = text_hash(eligibility_text)  # noqa: F841
             # TODO: query trial_cache DB for structured_criteria where
             # eligibility_text_hash == _hash. For now, return None
             # until nightly sync populates the cache.
