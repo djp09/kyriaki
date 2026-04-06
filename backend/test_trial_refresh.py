@@ -44,6 +44,7 @@ class TestTrialCacheDB:
         from db_models import Base
 
         async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.drop_all)
             await conn.run_sync(Base.metadata.create_all)
         async with async_session() as session:
             yield session

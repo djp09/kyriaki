@@ -76,15 +76,23 @@ def calculate_match_score(evaluations: list[dict], flags: list[str] | None = Non
         # Only hard-exclude if a NOT_MET category has zero MET criteria
         unmet_categories = not_met_categories - met_critical_categories
         if unmet_categories:
-            failed = next(e for e in not_met_critical if e.get("category") in unmet_categories)
+            failed_criteria = [e for e in not_met_critical if e.get("category") in unmet_categories]
+            failed = failed_criteria[0]
+            met_count = len([e for e in inclusion if e.get("status") == "MET"])
+            total_inc = len(inclusion)
+            explanation = (
+                f"This trial is unlikely to be a match. You meet {met_count} of "
+                f"{total_inc} inclusion criteria, but a key requirement is not met: "
+                f"{failed.get('criterion_text', 'Unknown criterion')}. "
+                f"{failed.get('reasoning', '')}"
+            )
+            if len(failed_criteria) > 1:
+                others = [e.get("criterion_text", "?") for e in failed_criteria[1:]]
+                explanation += f" Additionally not met: {'; '.join(others)}."
             return {
                 "score": 5.0,
                 "tier": "EXCLUDED",
-                "match_explanation": (
-                    f"This trial requires a criterion you do not meet: "
-                    f"{failed.get('criterion_text', 'Unknown criterion')}. "
-                    f"{failed.get('reasoning', '')}"
-                ),
+                "match_explanation": explanation,
                 "criteria_met": len([e for e in inclusion if e.get("status") == "MET"]),
                 "criteria_not_met": len([e for e in inclusion if e.get("status") == "NOT_MET"]),
                 "criteria_unknown": len([e for e in inclusion if e.get("status") == "INSUFFICIENT_INFO"]),
@@ -159,38 +167,39 @@ def _generate_explanation(
     score: float,
 ) -> str:
     """Generate a patient-friendly explanation of the match score."""
+    unknown_exc = len([e for e in exclusion if e.get("status") == "INSUFFICIENT_INFO"])
+
     if tier == "STRONG_MATCH":
         msg = (
             f"This trial appears to be a strong fit for you. "
             f"You meet {met} of {total} inclusion criteria we could evaluate"
         )
         if unknown > 0:
-            msg += f", with {unknown} item(s) your oncologist can help confirm"
+            msg += f", with {unknown} that your oncologist can help confirm"
         msg += "."
     elif tier == "POTENTIAL_MATCH":
         msg = (
-            f"This trial could be a good option. You meet {met} of {total} criteria, "
-            f"but {unknown} item(s) need more information from your medical team."
+            f"This trial could be a good option. You meet {met} of {total} inclusion criteria, "
+            f"but {unknown} need more information from your medical team."
         )
     elif tier == "PARTIAL_MATCH":
-        msg = f"This trial is a partial match. You meet {met} of {total} criteria"
+        msg = f"This trial is a partial match. You meet {met} of {total} inclusion criteria"
         if not_met > 0:
-            msg += f", but {not_met} criteria may not be met"
+            msg += f", {not_met} may not be met"
         if unknown > 0:
-            msg += f" and {unknown} need verification"
+            msg += f", and {unknown} need verification"
         msg += ". Discuss with your oncologist to see if it could still work."
     else:
         msg = (
             f"This trial is unlikely to be a match based on available information. "
-            f"Only {met} of {total} criteria are met"
+            f"You meet {met} of {total} inclusion criteria"
         )
         if not_met > 0:
             msg += f", with {not_met} not met"
         msg += "."
 
-    unknown_exc = len([e for e in exclusion if e.get("status") == "INSUFFICIENT_INFO"])
     if unknown_exc > 0:
-        msg += f" Note: {unknown_exc} exclusion criteria could not be fully evaluated — your oncologist should review these."
+        msg += f" Additionally, {unknown_exc} exclusion criteria could not be fully evaluated — your oncologist should review these."
 
     return msg
 

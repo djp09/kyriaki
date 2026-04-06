@@ -282,9 +282,34 @@ class TrialCacheDB(Base):
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
+    # Stage 3: semantic recall embedding (768-dim from nomic-embed-text)
+    summary_embedding: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
     __table_args__ = (
         Index("ix_trial_cache_key", "cache_key", unique=True),
         Index("ix_trial_cache_expires", "expires_at"),
+    )
+
+
+class StructuredCriteriaDB(Base):
+    """Per-trial Gemma-extracted eligibility criteria (Stage 4 cache).
+
+    Keyed by SHA-256 of the raw eligibility text so extraction only runs
+    once per unique text, regardless of how many cache entries reference it.
+    Populated by the nightly sync job; read at matching time.
+    """
+
+    __tablename__ = "structured_criteria"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    nct_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    eligibility_text_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    criteria_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    extracted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    __table_args__ = (
+        Index("ix_struct_crit_hash", "eligibility_text_hash", unique=True),
+        Index("ix_struct_crit_nct", "nct_id"),
     )
 
 

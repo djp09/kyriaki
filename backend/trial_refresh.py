@@ -2,7 +2,8 @@
 
 Queries ClinicalTrials.gov for each cancer type and stores results
 in TrialCacheDB so searches during the day hit the DB instead of
-the live API.
+the live API. Also runs Stage 4 Gemma extraction on cached trials
+to pre-populate structured_criteria for fast matching.
 """
 
 from __future__ import annotations
@@ -14,8 +15,9 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import get_settings
-from db_models import TrialCacheDB
+from db_models import StructuredCriteriaDB, TrialCacheDB
 from logging_config import get_logger
+from semantic_recall import text_hash
 from trials_client import search_nci_trials, search_trials
 
 logger = get_logger("kyriaki.trial_refresh")
@@ -194,6 +196,106 @@ async def purge_expired(session: AsyncSession) -> int:
     if count:
         logger.info("refresh.purged_expired", count=count)
     return count
+
+
+async def extract_criteria_for_trial(
+    session: AsyncSession,
+    nct_id: str,
+    eligibility_text: str,
+) -> bool:
+    """Run Gemma Stage 4 extraction on a single trial and store the result.
+
+    Returns True if extraction succeeded and was stored.
+    """
+    from criterion_extraction import extract_criteria
+
+    if not eligibility_text or len(eligibility_text.strip()) < 20:
+        return False
+
+    elig_hash = text_hash(eligibility_text)
+
+    # Skip if already extracted for this exact text
+    existing = await session.execute(
+        select(StructuredCriteriaDB.id).where(
+            StructuredCriteriaDB.eligibility_text_hash == elig_hash
+        )
+    )
+    if existing.scalar_one_or_none() is not None:
+        return False
+
+    try:
+        result = await extract_criteria(eligibility_text)
+        criteria_dicts = [c.model_dump() for c in result.criteria]
+        session.add(StructuredCriteriaDB(
+            nct_id=nct_id,
+            eligibility_text_hash=elig_hash,
+            criteria_json=criteria_dicts,
+        ))
+        await session.flush()
+        return True
+    except Exception as e:
+        logger.warning(
+            "refresh.extraction_failed",
+            nct_id=nct_id,
+            error=str(e),
+        )
+        return False
+
+
+async def extract_all_cached(session: AsyncSession) -> dict:
+    """Run Stage 4 Gemma extraction on all cached trials missing structured_criteria.
+
+    Designed to run as a nightly job after refresh_all(). Iterates all
+    active cache entries, extracts unique trials by eligibility text hash,
+    and stores results in the structured_criteria table.
+    """
+    stmt = select(TrialCacheDB).where(TrialCacheDB.expires_at > datetime.now(timezone.utc))
+    result = await session.execute(stmt)
+    entries = list(result.scalars().all())
+
+    extracted = 0
+    skipped = 0
+    errors = 0
+    seen_hashes: set[str] = set()
+
+    logger.info("refresh.extraction_start", cache_entries=len(entries))
+
+    for entry in entries:
+        trials = entry.trials_json if isinstance(entry.trials_json, list) else []
+        for trial in trials:
+            nct_id = trial.get("nct_id", "")
+            eligibility_text = trial.get("eligibility_criteria", "")
+            if not eligibility_text or len(eligibility_text.strip()) < 20:
+                skipped += 1
+                continue
+
+            elig_hash = text_hash(eligibility_text)
+            if elig_hash in seen_hashes:
+                skipped += 1
+                continue
+            seen_hashes.add(elig_hash)
+
+            try:
+                ok = await extract_criteria_for_trial(session, nct_id, eligibility_text)
+                if ok:
+                    extracted += 1
+                else:
+                    skipped += 1
+            except Exception:
+                errors += 1
+
+            # Gemma runs locally — pace to avoid overloading GPU
+            await asyncio.sleep(0.5)
+
+    summary = {
+        "extracted": extracted,
+        "skipped": skipped,
+        "errors": errors,
+        "unique_trials": len(seen_hashes),
+        "total_entries": len(entries),
+    }
+    logger.info("refresh.extraction_complete", **summary)
+    return summary
 
 
 async def get_cache_stats(session: AsyncSession) -> dict:

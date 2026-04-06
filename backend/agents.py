@@ -1025,12 +1025,32 @@ class MatchingAgent(BaseAgent):
             return None
         try:
             from semantic_recall import text_hash
+            from sqlalchemy import select
 
-            _hash = text_hash(eligibility_text)  # noqa: F841 — will be used when DB query is wired
-            # TODO: query trial_cache DB for structured_criteria where
-            # eligibility_text_hash == _hash. For now, return None
-            # until nightly sync populates the cache.
-            return None
+            from database import async_session
+            from db_models import StructuredCriteriaDB
+
+            elig_hash = text_hash(eligibility_text)
+
+            async with async_session() as session:
+                stmt = select(StructuredCriteriaDB.criteria_json).where(
+                    StructuredCriteriaDB.eligibility_text_hash == elig_hash,
+                ).limit(1)
+                result = await session.execute(stmt)
+                row = result.scalar_one_or_none()
+
+            if not row:
+                return None
+
+            # Convert cached criteria list to parse_eligibility_criteria shape
+            criteria = row if isinstance(row, list) else row.get("criteria", [])
+            inclusion = [c for c in criteria if c.get("type") == "inclusion"]
+            exclusion = [c for c in criteria if c.get("type") == "exclusion"]
+            return {
+                "inclusion_criteria": inclusion,
+                "exclusion_criteria": exclusion,
+                "total_criteria": len(criteria),
+            }
         except Exception as e:
             logger.warning("matching.stage4_cache_failed", error=str(e), nct_id=nct_id)
             return None
