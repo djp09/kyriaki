@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import re
 import time
 
 import httpx
@@ -13,6 +14,77 @@ from logging_config import get_logger
 logger = get_logger("kyriaki.trials")
 
 BASE_URL = "https://clinicaltrials.gov/api/v2"
+
+# Positive biomarker gene → targeted drug names for ClinicalTrials.gov search.
+# These are standard-of-care or commonly trialed agents; the goal is to pull in
+# trials testing therapies for the patient's specific molecular profile.
+_GENE_TO_DRUGS: dict[str, list[str]] = {
+    "EGFR": ["osimertinib", "erlotinib", "gefitinib", "afatinib", "amivantamab"],
+    "ALK": ["alectinib", "lorlatinib", "crizotinib", "brigatinib", "ceritinib"],
+    "ROS1": ["crizotinib", "entrectinib", "lorlatinib"],
+    "ERBB2": ["trastuzumab", "pertuzumab", "T-DXd", "tucatinib", "neratinib"],
+    "BRAF": ["dabrafenib", "trametinib", "encorafenib", "vemurafenib"],
+    "KRAS": ["sotorasib", "adagrasib"],
+    "BRCA1": ["olaparib", "rucaparib", "niraparib", "talazoparib"],
+    "BRCA2": ["olaparib", "rucaparib", "niraparib", "talazoparib"],
+    "NTRK1": ["larotrectinib", "entrectinib"],
+    "NTRK2": ["larotrectinib", "entrectinib"],
+    "NTRK3": ["larotrectinib", "entrectinib"],
+    "MET": ["capmatinib", "tepotinib", "crizotinib"],
+    "RET": ["selpercatinib", "pralsetinib"],
+    "FGFR2": ["erdafitinib", "futibatinib", "pemigatinib"],
+    "FGFR3": ["erdafitinib"],
+    "MSH2": ["pembrolizumab", "nivolumab", "dostarlimab"],
+    "PIK3CA": ["alpelisib"],
+    "IDH1": ["ivosidenib"],
+    "IDH2": ["enasidenib"],
+}
+
+# Biomarkers where negative status is not actionable for targeted therapy search
+_NEGATIVE_SUFFIXES = ("-", "negative", "absent", "not detected", "wild type", "wt")
+
+
+def biomarker_search_terms(biomarkers: list[str]) -> tuple[str | None, str | None]:
+    """Derive (query_intr, query_term) from patient biomarkers for trial search.
+
+    Returns the first actionable positive biomarker's drug as query_intr and
+    the gene name as query_term. Returns (None, None) if no actionable
+    biomarkers are found.
+    """
+    from civic_client import _parse_biomarker_to_gene
+
+    for biomarker in biomarkers:
+        clean = biomarker.strip().lower()
+
+        # Skip negative biomarkers — they don't drive targeted therapy search
+        if any(clean.endswith(s) for s in _NEGATIVE_SUFFIXES):
+            continue
+        if "negative" in clean or "absent" in clean or "not detected" in clean:
+            continue
+
+        gene = _parse_biomarker_to_gene(biomarker)
+        if not gene:
+            continue
+
+        drugs = _GENE_TO_DRUGS.get(gene)
+        if not drugs:
+            continue
+
+        # Use the first (most common) drug as intervention filter
+        query_intr = drugs[0]
+        # Also add gene name as a general term to catch gene-named trials
+        query_term = gene
+        logger.info(
+            "trials.biomarker_search_terms",
+            biomarker=biomarker,
+            gene=gene,
+            query_intr=query_intr,
+            query_term=query_term,
+        )
+        return query_intr, query_term
+
+    return None, None
+
 
 # Module-level shared HTTP client — reuses connections across requests
 _shared_client: httpx.AsyncClient | None = None
@@ -144,6 +216,27 @@ def _extract_study(study: dict) -> dict:
     }
 
 
+# Keywords indicating a non-treatment study (biobanks, tissue collection, surveys, etc.)
+# These studies can't score well because they lack therapeutic eligibility criteria.
+_NON_TREATMENT_PATTERN = re.compile(
+    r"\b(biobank|biospecimen|tissue\s+collect\w*|sample\s+collect\w*|"
+    r"registry\s+stud\w*|natural\s+history|survey\s+stud\w*|"
+    r"specimen\s+bank|tumor\s+bank|blood\s+collect\w*)\b",
+    re.IGNORECASE,
+)
+
+
+def is_non_treatment_study(study: dict) -> bool:
+    """Return True if the study is observational/biobank, not a treatment trial."""
+    title = study.get("brief_title", "")
+    summary = study.get("brief_summary", "")
+    text = f"{title} {summary}"
+    if _NON_TREATMENT_PATTERN.search(text):
+        return True
+    # No interventions at all is a strong signal of non-treatment
+    return not study.get("interventions")
+
+
 def _parse_age_years(age_str: str) -> int | None:
     if not age_str:
         return None
@@ -264,6 +357,13 @@ async def search_trials(
         if sex and study.get("sex") != "ALL" and study["sex"].upper() != sex.upper():
             continue
 
+        # Filter out non-treatment studies (biobanks, registries, etc.)
+        if is_non_treatment_study(study):
+            logger.debug(
+                "trials.filtered_non_treatment", nct_id=study.get("nct_id"), title=study.get("brief_title", "")[:60]
+            )
+            continue
+
         studies.append(study)
 
     _set_cache(cache_k, studies)
@@ -326,6 +426,9 @@ async def search_nci_trials(
                 continue
 
         if sex and study.get("sex") != "ALL" and study["sex"].upper() != sex.upper():
+            continue
+
+        if is_non_treatment_study(study):
             continue
 
         studies.append(study)

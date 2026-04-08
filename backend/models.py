@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class PatientProfile(BaseModel):
@@ -24,9 +24,16 @@ class CriterionEvaluation(BaseModel):
     criterion_id: str = ""
     type: str = ""  # "inclusion" or "exclusion"
     status: str  # "MET", "NOT_MET", "INSUFFICIENT_INFO" (inclusion) / "TRIGGERED", "NOT_TRIGGERED", "INSUFFICIENT_INFO" (exclusion)
-    confidence: str = "MEDIUM"  # "HIGH", "MEDIUM", "LOW"
+    confidence: str | None = "MEDIUM"  # "HIGH", "MEDIUM", "LOW"
     explanation: str
     patient_data_used: list[str] = Field(default_factory=list)
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def coerce_confidence(cls, v: object) -> str:
+        if v is None or v == "":
+            return "MEDIUM"
+        return str(v)
 
 
 class TrialMatch(BaseModel):

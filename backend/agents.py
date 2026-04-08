@@ -60,6 +60,7 @@ from tools.data_formatter import (
 from tools.drug_normalization import normalize_drug_list_tool
 from tools.prompt_renderer import render_prompt
 from tools.trial_search import fetch_trial_tool, search_and_merge_tool
+from trials_client import biomarker_search_terms
 
 logger = get_logger("kyriaki.agents")
 
@@ -410,7 +411,45 @@ class MatchingAgent(BaseAgent):
         return scratchpad.state.get("trials_pool", {}), scratchpad.state.get("analyses", {})
 
     async def _do_search(self, patient: PatientProfile) -> dict:
-        """Core search logic: query ClinicalTrials.gov + NCI, return deduplicated pool."""
+        """Core search logic: biomarker-targeted + broad search, merged and deduplicated."""
+        query_intr, query_term = biomarker_search_terms(patient.biomarkers or [])
+
+        # If we have actionable biomarkers, run a targeted search AND a broad search
+        # concurrently, then merge. This ensures we get biomarker-specific trials
+        # (e.g., osimertinib for EGFR+) without missing general cancer-type trials.
+        if query_intr:
+            import asyncio
+
+            targeted, broad = await asyncio.gather(
+                search_and_merge_tool(
+                    cancer_type=patient.cancer_type,
+                    age=patient.age,
+                    sex=patient.sex,
+                    page_size=20,
+                    query_intr=query_intr,
+                    query_term=query_term,
+                    include_nci=True,
+                ),
+                search_and_merge_tool(
+                    cancer_type=patient.cancer_type,
+                    age=patient.age,
+                    sex=patient.sex,
+                    page_size=20,
+                    include_nci=True,
+                ),
+            )
+            pool = {}
+            # Targeted results first so they appear higher in the pool
+            for result in [targeted, broad]:
+                if result.success:
+                    for trial in result.data:
+                        if trial["nct_id"] not in pool:
+                            pool[trial["nct_id"]] = trial
+            if not pool:
+                logger.warning("matching.search_failed", error="Both searches returned empty")
+            return pool
+
+        # No actionable biomarkers — single broad search
         result = await search_and_merge_tool(
             cancer_type=patient.cancer_type,
             age=patient.age,

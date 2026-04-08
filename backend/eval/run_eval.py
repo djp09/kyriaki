@@ -29,7 +29,7 @@ from eval.synthetic_patients import SYNTHETIC_PATIENTS
 from models import PatientProfile
 from tools.criteria_parser import parse_eligibility_criteria
 from tools.scoring import calculate_match_score
-from trials_client import search_trials
+from trials_client import biomarker_search_terms, merge_and_deduplicate, search_trials
 
 
 async def evaluate_patient(patient_data: dict, settings=None) -> dict:
@@ -55,10 +55,19 @@ async def evaluate_patient(patient_data: dict, settings=None) -> dict:
     print(f"  Prior tx: {', '.join(profile.prior_treatments) or 'None'} ({profile.lines_of_therapy} lines)")
     print(f"  Age/Sex: {profile.age}/{profile.sex}, ECOG: {profile.ecog_score}")
 
-    # Step 1: Search for trials
+    # Step 1: Search for trials (biomarker-targeted + broad, matching the real pipeline)
     print(f"\n  Searching ClinicalTrials.gov...")
     start = time.monotonic()
-    trials = await search_trials(profile.cancer_type, profile.age, profile.sex, page_size=20)
+    query_intr, query_term = biomarker_search_terms(profile.biomarkers or [])
+    if query_intr:
+        print(f"  Biomarker search: query_intr={query_intr}, query_term={query_term}")
+        targeted, broad = await asyncio.gather(
+            search_trials(profile.cancer_type, profile.age, profile.sex, page_size=20, query_intr=query_intr, query_term=query_term),
+            search_trials(profile.cancer_type, profile.age, profile.sex, page_size=20),
+        )
+        trials = merge_and_deduplicate([targeted, broad])
+    else:
+        trials = await search_trials(profile.cancer_type, profile.age, profile.sex, page_size=20)
     search_time = time.monotonic() - start
     print(f"  Found {len(trials)} trials in {search_time:.1f}s")
 

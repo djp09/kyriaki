@@ -32,7 +32,7 @@ from tools.data_formatter import (
     build_unscored_match as _build_unscored_match,
 )
 from tools.prompt_renderer import render_prompt
-from trials_client import search_trials
+from trials_client import biomarker_search_terms, search_trials
 
 logger = get_logger("kyriaki.matching")
 
@@ -165,11 +165,14 @@ async def match_trials(patient: PatientProfile, max_results: int = 10) -> dict:
     settings = get_settings()
 
     candidate_count = min(max(max_results * 2, 6), settings.default_page_size)
+    query_intr, query_term = biomarker_search_terms(patient.biomarkers or [])
     trials = await search_trials(
         cancer_type=patient.cancer_type,
         age=patient.age,
         sex=patient.sex,
         page_size=candidate_count,
+        query_intr=query_intr,
+        query_term=query_term,
     )
 
     total = len(trials)

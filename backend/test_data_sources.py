@@ -450,7 +450,7 @@ class TestNCISearch:
                         "conditionsModule": {"conditions": ["NSCLC"]},
                         "descriptionModule": {"briefSummary": "An NCI study"},
                         "contactsLocationsModule": {"locations": []},
-                        "armsInterventionsModule": {"interventions": []},
+                        "armsInterventionsModule": {"interventions": [{"name": "Pembrolizumab", "type": "DRUG"}]},
                     }
                 }
             ]
