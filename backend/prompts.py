@@ -204,6 +204,35 @@ You are a clinical trial monitoring analyst. Your goal is to detect meaningful c
 Think step by step, then call the appropriate tool.
 """
 
+PRESCREEN_SYSTEM_PROMPT = """\
+You are an oncology clinical trial pre-screening specialist. Quickly assess which trials are worth detailed analysis.
+
+## Patient Profile
+- **Cancer Type:** {cancer_type}
+- **Stage:** {cancer_stage}
+- **Biomarkers:** {biomarkers}
+- **Prior Treatments:** {prior_treatments} ({lines_of_therapy} prior line(s))
+- **Age:** {age}, **Sex:** {sex}
+
+## Task
+For each trial, assign a relevance tier:
+- **HIGH** — Cancer type matches, no obvious disqualifiers. Worth detailed analysis.
+- **LOW** — Wrong cancer type, wrong stage, clearly ineligible, observational/biobank study, or not a treatment trial.
+
+Be aggressive with LOW — we only want to deeply analyze the most promising matches.
+
+Respond with ONLY a JSON object:
+{{"rankings": [{{"nct_id": "<id>", "tier": "HIGH|LOW", "reason": "<5 words>"}}]}}
+"""
+
+PRESCREEN_USER_PROMPT = """\
+## Candidate Trials
+{trials_list}
+
+Evaluate each trial above against the patient profile. Respond with the JSON rankings.
+"""
+
+# Legacy combined prompt
 PRESCREEN_PROMPT = """\
 You are an oncology clinical trial pre-screening specialist. Quickly assess which of these trials are worth detailed analysis for this patient.
 
@@ -228,8 +257,13 @@ Respond with ONLY a JSON object:
 {{"rankings": [{{"nct_id": "<id>", "tier": "HIGH|LOW", "reason": "<5 words>"}}]}}
 """
 
-ELIGIBILITY_ANALYSIS_PROMPT = """\
-You are an expert oncology clinical trial eligibility analyst. Evaluate this patient against EACH criterion individually.
+# Split into system (cacheable per-patient) + user (per-trial) for prompt caching.
+# The system prompt contains the patient profile and classification rules — identical
+# across all trial analyses in a batch. Anthropic caches it after the first call,
+# reducing input tokens by ~60-80% on subsequent trials.
+
+ELIGIBILITY_SYSTEM_PROMPT = """\
+You are an expert oncology clinical trial eligibility analyst. Evaluate a patient against EACH criterion individually.
 
 ## Patient Profile
 - **Cancer Type:** {cancer_type}
@@ -244,13 +278,6 @@ You are an expert oncology clinical trial eligibility analyst. Evaluate this pat
 - **Additional Notes:** {additional_notes}
 
 {enriched_context}
-
-## Clinical Trial: {nct_id} — {brief_title}
-**Phase:** {phase}
-**Summary:** {brief_summary}
-
-## Parsed Criteria to Evaluate
-{parsed_criteria}
 
 ## Classification Guidelines
 
@@ -291,6 +318,31 @@ Respond with ONLY a JSON object. Evaluate EVERY criterion listed above — do no
 
 {{"criterion_evaluations": [{{"criterion_id": "<id from parsed criteria>", "criterion_text": "<the criterion>", "type": "inclusion|exclusion", "status": "MET|NOT_MET|INSUFFICIENT_INFO|TRIGGERED|NOT_TRIGGERED", "confidence": "HIGH|MEDIUM|LOW", "reasoning": "<1-2 sentences citing specific patient data>", "patient_data_used": ["<field names from patient profile>"]}}], "flags_for_oncologist": ["<items that need physician verification>"]}}
 """
+
+ELIGIBILITY_USER_PROMPT = """\
+## Clinical Trial: {nct_id} — {brief_title}
+**Phase:** {phase}
+**Summary:** {brief_summary}
+
+## Parsed Criteria to Evaluate
+{parsed_criteria}
+
+Evaluate EVERY criterion above against the patient profile in your instructions. Respond with ONLY the JSON object.
+"""
+
+# Legacy combined prompt for backward compatibility (prompt_renderer uses this)
+ELIGIBILITY_ANALYSIS_PROMPT = (
+    ELIGIBILITY_SYSTEM_PROMPT
+    + """
+
+## Clinical Trial: {nct_id} — {brief_title}
+**Phase:** {phase}
+**Summary:** {brief_summary}
+
+## Parsed Criteria to Evaluate
+{parsed_criteria}
+"""
+)
 
 PATIENT_SUMMARY_PROMPT = """\
 Write a brief, warm 2-3 sentence summary of this cancer patient's journey so far. This will appear at the top of their personalized trial matching results, so it should feel supportive and acknowledge what they've been through. Include the key clinical details that matter for trial matching (biomarkers and treatment history) woven naturally into the narrative.

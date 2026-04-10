@@ -80,6 +80,7 @@ class AgentContext:
     patient_id: uuid.UUID
     input_data: dict[str, Any]
     emit: Callable[[str, dict[str, Any] | None], Coroutine[Any, Any, None]]
+    db_session: Any = None  # optional DB session for patient loading
 
 
 @dataclass
@@ -100,13 +101,12 @@ class AgentResult:
     gate_request: GateRequest | None = None
 
 
-async def load_patient_from_db(patient_id: uuid.UUID) -> PatientProfile:
+async def load_patient_from_db(patient_id: uuid.UUID, session=None) -> PatientProfile:
     """Load a patient profile from DB by ID. Used by agents to avoid storing PHI in task input_data."""
-    from database import async_session
     from db_service import read_patient_profile
 
-    async with async_session() as session:
-        patient_db = await read_patient_profile(session, patient_id, purpose="agent_execution")
+    async def _load(s):
+        patient_db = await read_patient_profile(s, patient_id, purpose="agent_execution")
         if patient_db is None:
             raise ValueError(f"Patient {patient_id} not found")
         return PatientProfile(
@@ -124,6 +124,14 @@ async def load_patient_from_db(patient_id: uuid.UUID) -> PatientProfile:
             additional_conditions=patient_db.additional_conditions or [],
             additional_notes=patient_db.additional_notes,
         )
+
+    if session is not None:
+        return await _load(session)
+
+    from database import async_session
+
+    async with async_session() as new_session:
+        return await _load(new_session)
 
 
 class BaseAgent(ABC):
@@ -289,7 +297,7 @@ class MatchingAgent(BaseAgent):
         except Exception as e:
             return AgentResult(success=False, error=f"Invalid input: {e}")
 
-        patient = await load_patient_from_db(ctx.patient_id)
+        patient = await load_patient_from_db(ctx.patient_id, session=ctx.db_session)
         max_results = inputs.max_results
         settings = get_settings()
 
@@ -501,7 +509,7 @@ class MatchingAgent(BaseAgent):
         max_deep: int = 5,
     ) -> dict:
         """Core prescreen + deep analysis logic. Returns analyses dict."""
-        from prompts import PRESCREEN_PROMPT
+        from prompts import PRESCREEN_SYSTEM_PROMPT, PRESCREEN_USER_PROMPT
 
         analyses: dict = {}
         if not pool:
@@ -520,12 +528,10 @@ class MatchingAgent(BaseAgent):
             )
 
         patient_vars = format_patient_for_prompt(patient)
-        prescreen_prompt = PRESCREEN_PROMPT.format(
-            **patient_vars,
-            trials_list="\n".join(trials_list_lines),
-        )
+        prescreen_sys = PRESCREEN_SYSTEM_PROMPT.format(**patient_vars)
+        prescreen_user = PRESCREEN_USER_PROMPT.format(trials_list="\n".join(trials_list_lines))
 
-        prescreen_result = await claude_json_call(prescreen_prompt, max_tokens=1200)
+        prescreen_result = await claude_json_call(prescreen_user, max_tokens=1200, system=prescreen_sys)
         if not prescreen_result.success:
             high_tier_ids = list(unanalyzed.keys())[:max_deep]
         else:
@@ -572,8 +578,13 @@ class MatchingAgent(BaseAgent):
         # --- Tier 2: Deep analysis on HIGH-tier ---
         to_analyze = [unanalyzed[nid] for nid in high_tier_ids[:max_deep] if nid in unanalyzed]
 
+        # Build system prompt ONCE for all trials (prompt caching)
+        sys_prompt = self._build_eligibility_system_prompt(patient, biomarker_context)
+
         async def analyze_one(trial: dict) -> tuple[str, dict | None]:
-            result = await self._analyze_single_trial(patient, trial, settings, biomarker_context)
+            result = await self._analyze_single_trial(
+                patient, trial, settings, biomarker_context, system_prompt=sys_prompt
+            )
             return trial["nct_id"], result
 
         results = await asyncio.gather(*[analyze_one(t) for t in to_analyze])
@@ -627,7 +638,7 @@ class MatchingAgent(BaseAgent):
         Tier 1: Fast pre-screen ALL unanalyzed trials in one Claude call (~5s).
         Tier 2: Deep criterion-level analysis on only the HIGH-tier trials (~5s each).
         """
-        from prompts import PRESCREEN_PROMPT
+        from prompts import PRESCREEN_SYSTEM_PROMPT, PRESCREEN_USER_PROMPT
 
         pool = scratchpad.state["trials_pool"]
         analyses = scratchpad.state["analyses"]
@@ -652,12 +663,10 @@ class MatchingAgent(BaseAgent):
             )
 
         patient_vars = format_patient_for_prompt(patient)
-        prescreen_prompt = PRESCREEN_PROMPT.format(
-            **patient_vars,
-            trials_list="\n".join(trials_list_lines),
-        )
+        prescreen_sys = PRESCREEN_SYSTEM_PROMPT.format(**patient_vars)
+        prescreen_user = PRESCREEN_USER_PROMPT.format(trials_list="\n".join(trials_list_lines))
 
-        prescreen_result = await claude_json_call(prescreen_prompt, max_tokens=800)
+        prescreen_result = await claude_json_call(prescreen_user, max_tokens=800, system=prescreen_sys)
         if not prescreen_result.success:
             # Fallback: analyze first 5 without pre-screening
             high_tier_ids = list(unanalyzed.keys())[:5]
@@ -697,8 +706,13 @@ class MatchingAgent(BaseAgent):
 
         biomarker_context = scratchpad.state.get("biomarker_context", "")
 
+        # Build system prompt ONCE for all trials (prompt caching)
+        sys_prompt = self._build_eligibility_system_prompt(patient, biomarker_context)
+
         async def analyze_one(trial: dict) -> tuple[str, dict | None]:
-            result = await self._analyze_single_trial(patient, trial, settings, biomarker_context)
+            result = await self._analyze_single_trial(
+                patient, trial, settings, biomarker_context, system_prompt=sys_prompt
+            )
             return trial["nct_id"], result
 
         results = await asyncio.gather(*[analyze_one(t) for t in to_analyze])
@@ -776,12 +790,33 @@ class MatchingAgent(BaseAgent):
 
         return f"Evaluated {len(borderline)} borderline scores, adjusted {adjusted_count}", True
 
+    def _build_eligibility_system_prompt(self, patient: PatientProfile, biomarker_context: str = "") -> str:
+        """Build the cacheable system prompt for eligibility analysis.
+
+        This contains the patient profile + classification rules. Identical
+        across all trial analyses in a batch, so Anthropic caches it after
+        the first call (~60-80% input token reduction on subsequent calls).
+        """
+        from prompts import ELIGIBILITY_SYSTEM_PROMPT
+
+        patient_vars = format_patient_for_prompt(patient)
+        enriched = ""
+        if biomarker_context:
+            enriched = f"## Enriched Biomarker Context\n{biomarker_context}"
+        return ELIGIBILITY_SYSTEM_PROMPT.format(**patient_vars, enriched_context=enriched)
+
     async def _analyze_single_trial(
-        self, patient: PatientProfile, trial: dict, settings, biomarker_context: str = ""
+        self,
+        patient: PatientProfile,
+        trial: dict,
+        settings,
+        biomarker_context: str = "",
+        system_prompt: str | None = None,
     ) -> dict | None:
         """Analyze a single trial's eligibility using criterion-level decomposition.
 
         Pipeline: parse criteria → evaluate per-criterion → score programmatically.
+        When system_prompt is provided, uses it for prompt caching (shared across batch).
         """
         from tools.criteria_parser import parse_eligibility_criteria
         from tools.scoring import calculate_match_score
@@ -825,23 +860,37 @@ class MatchingAgent(BaseAgent):
         parsed_criteria_text = "\n".join(criteria_lines)
 
         # Step 2: Evaluate each criterion with Claude
-        patient_vars = format_patient_for_prompt(patient)
-        enriched = ""
-        if biomarker_context:
-            enriched = f"## Enriched Biomarker Context\n{biomarker_context}"
+        # When system_prompt is provided (batch mode), use split prompt for caching.
+        # The system prompt (patient + rules) is cached by Anthropic after the first call.
+        if system_prompt:
+            from prompts import ELIGIBILITY_USER_PROMPT
 
-        prompt_result = render_prompt(
-            prompt_name="eligibility_analysis",
-            **patient_vars,
-            nct_id=nct_id,
-            brief_title=trial["brief_title"],
-            phase=trial["phase"],
-            brief_summary=trial["brief_summary"],
-            parsed_criteria=parsed_criteria_text,
-            enriched_context=enriched,
-        )
-        if not prompt_result.success:
-            return None
+            user_msg = ELIGIBILITY_USER_PROMPT.format(
+                nct_id=nct_id,
+                brief_title=trial["brief_title"],
+                phase=trial["phase"],
+                brief_summary=trial["brief_summary"],
+                parsed_criteria=parsed_criteria_text,
+            )
+        else:
+            # Fallback: combined prompt (no caching)
+            patient_vars = format_patient_for_prompt(patient)
+            enriched = ""
+            if biomarker_context:
+                enriched = f"## Enriched Biomarker Context\n{biomarker_context}"
+            prompt_result = render_prompt(
+                prompt_name="eligibility_analysis",
+                **patient_vars,
+                nct_id=nct_id,
+                brief_title=trial["brief_title"],
+                phase=trial["phase"],
+                brief_summary=trial["brief_summary"],
+                parsed_criteria=parsed_criteria_text,
+                enriched_context=enriched,
+            )
+            if not prompt_result.success:
+                return None
+            user_msg = prompt_result.data
 
         # Adaptive max_tokens: scale with criteria count to avoid truncation
         analysis_max_tokens = min(2500, max(1200, len(criteria_lines) * 120))
@@ -852,7 +901,8 @@ class MatchingAgent(BaseAgent):
                     get_claude_client(),
                     model=settings.claude_model,
                     max_tokens=analysis_max_tokens,
-                    messages=[{"role": "user", "content": prompt_result.data}],
+                    messages=[{"role": "user", "content": user_msg}],
+                    system=system_prompt,
                 )
                 text = response.content[0].text.strip()
                 result = parse_json_response(text)
@@ -1161,7 +1211,7 @@ class DossierAgent(BaseAgent):
         except Exception as e:
             return AgentResult(success=False, error=f"Invalid input: {e}")
 
-        patient = await load_patient_from_db(ctx.patient_id)
+        patient = await load_patient_from_db(ctx.patient_id, session=ctx.db_session)
         patient_dict = patient.model_dump()
 
         settings = get_settings()
@@ -1302,7 +1352,7 @@ class EnrollmentAgent(BaseAgent):
         except Exception as e:
             return AgentResult(success=False, error=f"Invalid input: {e}")
 
-        patient = await load_patient_from_db(ctx.patient_id)
+        patient = await load_patient_from_db(ctx.patient_id, session=ctx.db_session)
         patient_dict = patient.model_dump()
 
         dossier = inputs.dossier

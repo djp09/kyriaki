@@ -231,7 +231,7 @@ async def _execute_task(
 
     try:
         agent = _registry[agent_type]()
-        ctx = AgentContext(task_id=task.id, patient_id=patient_id, input_data=input_data, emit=emit)
+        ctx = AgentContext(task_id=task.id, patient_id=patient_id, input_data=input_data, emit=emit, db_session=session)
         result = await agent.execute(ctx)
     except Exception as e:
         task.status = TaskStatus.failed.value

@@ -53,8 +53,8 @@ class Settings(BaseSettings):
 
     # Matching engine
     match_timeout: int = 180
-    max_concurrent_analyses: int = 5
-    inter_call_delay: float = 0.3
+    max_concurrent_analyses: int = 10  # adaptive limiter backs off on 429s
+    inter_call_delay: float = 0.1  # reduced from 0.3; limiter handles pacing
     max_retries: int = 3
     default_page_size: int = 10
 
