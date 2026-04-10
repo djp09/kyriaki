@@ -62,7 +62,14 @@ async def evaluate_patient(patient_data: dict, settings=None) -> dict:
     if query_intr:
         print(f"  Biomarker search: query_intr={query_intr}, query_term={query_term}")
         targeted, broad = await asyncio.gather(
-            search_trials(profile.cancer_type, profile.age, profile.sex, page_size=20, query_intr=query_intr, query_term=query_term),
+            search_trials(
+                profile.cancer_type,
+                profile.age,
+                profile.sex,
+                page_size=20,
+                query_intr=query_intr,
+                query_term=query_term,
+            ),
             search_trials(profile.cancer_type, profile.age, profile.sex, page_size=20),
         )
         trials = merge_and_deduplicate([targeted, broad])

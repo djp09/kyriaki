@@ -143,9 +143,7 @@ def classify_patient(patient: PatientProfile) -> RouteConfig:
     # Determine complexity
     if is_pediatric or is_rare:
         complexity = "complex"
-    elif high_therapy_lines or many_biomarkers:
-        complexity = "moderate"
-    elif not is_common:
+    elif high_therapy_lines or many_biomarkers or not is_common:
         complexity = "moderate"
     else:
         complexity = "simple"

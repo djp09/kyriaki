@@ -11,8 +11,9 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "main.py" = ["E402", "B008"]  # load_dotenv() before imports; Depends() in defaults is standard FastAPI
+"auth.py" = ["B008"]  # Depends() in defaults is the standard FastAPI dependency-injection pattern
 "test_*.py" = ["B017"]  # broad exception in pytest.raises is fine for validation tests
-"run_*.py" = ["E402", "I001", "F541"]  # standalone scripts need import order flexibility
+"run_*.py" = ["E402", "I001", "F541", "F841"]  # standalone scripts need import order flexibility
 "db_models.py" = ["UP045"]  # SQLAlchemy evaluates Mapped[Optional[X]] at runtime; X | None breaks on 3.9
 "alembic/*" = ["UP"]  # alembic templates use old-style typing
 

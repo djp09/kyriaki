@@ -121,9 +121,7 @@ def _scrub_system_blocks(
         if not isinstance(block, dict):
             raise PHIBoundaryViolation(f"System block must be a dict, got {type(block).__name__}")
         if block.get("type") != "text":
-            raise PHIBoundaryViolation(
-                f"Only text blocks are allowed in system prompts, got {block.get('type')!r}"
-            )
+            raise PHIBoundaryViolation(f"Only text blocks are allowed in system prompts, got {block.get('type')!r}")
         cleaned = _scrub_text_block(block.get("text", ""), report)
         new_block = {**block, "text": cleaned}
         blocks.append(new_block)
