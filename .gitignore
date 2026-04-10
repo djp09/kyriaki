@@ -9,6 +9,8 @@ backend/.env
 __pycache__/
 *.pyc
 *.db
+*.db-shm
+*.db-wal
 .ruff_cache/
 .pytest_cache/
 .mypy_cache/
@@ -34,3 +36,10 @@ Thumbs.db
 
 # design docs (keep out of repo)
 Kyriaki_*.md
+DATA_SOURCES.md
+Healthcare_Data_Standards_and_Testing.md
+MATCHING_DEEP_DIVE.md
+Reflex_Basics.md
+
+# eval outputs
+backend/eval/last_run.json
