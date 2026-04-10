@@ -330,9 +330,9 @@ class MatchingAgent(BaseAgent):
                     normalized_treatments.append(t)
             patient_vars["prior_treatments"] = ", ".join(normalized_treatments) or "None"
 
-        # Simple patients: direct pipeline (no agent loop planning overhead)
-        # Moderate/complex patients: adaptive agent loop with planning
-        if route.complexity == "simple":
+        # Simple + moderate patients: direct pipeline (fast, no planning overhead)
+        # Complex patients only: adaptive agent loop with planning
+        if route.complexity in ("simple", "moderate"):
             pool, analyses = await self._run_direct_pipeline(
                 patient,
                 settings,
@@ -387,7 +387,7 @@ class MatchingAgent(BaseAgent):
         if emit:
             await emit("progress", {"step": "analyzing_trials", "iteration": 2, "reasoning": "Analyzing eligibility"})
 
-        analyses = await self._do_prescreen_and_analyze(pool, patient, settings, biomarker_context, max_deep=5)
+        analyses = await self._do_prescreen_and_analyze(pool, patient, settings, biomarker_context, max_deep=10)
         logger.info("matching.direct_pipeline_complete", analyzed=len(analyses), pool=len(pool))
 
         return pool, analyses
@@ -701,7 +701,7 @@ class MatchingAgent(BaseAgent):
             return f"Pre-screened {len(unanalyzed)} trials, none passed to deep analysis", True
 
         # --- Tier 2: Deep criterion-level analysis on HIGH-tier only ---
-        max_deep = min(len(high_tier_ids), budget.analyses_remaining, 5)
+        max_deep = min(len(high_tier_ids), budget.analyses_remaining, 10)
         to_analyze = [unanalyzed[nid] for nid in high_tier_ids[:max_deep] if nid in unanalyzed]
 
         biomarker_context = scratchpad.state.get("biomarker_context", "")
