@@ -177,12 +177,15 @@ def _fallback_summary(patient: PatientProfile) -> str:
 
 
 async def match_trials(patient: PatientProfile, max_results: int = 10) -> dict:
+    from tools.trial_classifier import canonical_search_term
+
     settings = get_settings()
 
     candidate_count = min(max(max_results * 2, 6), settings.default_page_size)
     query_intr, query_term = biomarker_search_terms(patient.biomarkers or [])
+    search_cancer_type = canonical_search_term(patient.cancer_type)
     trials = await search_trials(
-        cancer_type=patient.cancer_type,
+        cancer_type=search_cancer_type,
         age=patient.age,
         sex=patient.sex,
         page_size=candidate_count,

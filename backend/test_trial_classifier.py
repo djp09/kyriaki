@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from tools.trial_classifier import (
     cancer_type_matches,
+    canonical_search_term,
     classify_interventions,
     is_biomarker_aligned,
     is_radiation_or_observational_only,
@@ -254,3 +255,41 @@ class TestCancerTypeMatches:
         ok, _ = cancer_type_matches("NSCLC", [], "")
         # With no trial info, allow through (defensive)
         assert ok is True
+
+
+# ---------------------------------------------------------------------------
+# canonical_search_term
+# ---------------------------------------------------------------------------
+
+
+class TestCanonicalSearchTerm:
+    def test_nsclc_subtype_stripped(self):
+        assert canonical_search_term("Non-Small Cell Lung Cancer - Adenocarcinoma") == "Non-Small Cell Lung Cancer"
+
+    def test_nsclc_already_canonical(self):
+        assert canonical_search_term("Non-Small Cell Lung Cancer") == "Non-Small Cell Lung Cancer"
+
+    def test_lung_adenocarcinoma_maps_to_nsclc(self):
+        assert canonical_search_term("Lung Adenocarcinoma") == "Non-Small Cell Lung Cancer"
+
+    def test_nsclc_acronym(self):
+        assert canonical_search_term("NSCLC") == "Non-Small Cell Lung Cancer"
+
+    def test_sclc(self):
+        assert canonical_search_term("Small Cell Lung Cancer") == "Small Cell Lung Cancer"
+
+    def test_tnbc(self):
+        assert canonical_search_term("Triple Negative Breast Cancer") == "Triple Negative Breast Cancer"
+
+    def test_breast_subtype(self):
+        assert canonical_search_term("Breast Cancer - HER2 Positive") == "Breast Cancer"
+
+    def test_unknown_pass_through(self):
+        # Unknown cancer type should be returned as-is
+        assert canonical_search_term("Some Rare Sarcoma") == "Some Rare Sarcoma"
+
+    def test_em_dash_separator(self):
+        assert canonical_search_term("Non-Small Cell Lung Cancer — Squamous") == "Non-Small Cell Lung Cancer"
+
+    def test_empty(self):
+        assert canonical_search_term("") == ""

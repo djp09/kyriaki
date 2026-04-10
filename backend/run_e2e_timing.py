@@ -20,11 +20,13 @@ import time
 
 
 NSCLC_PATIENT = {
-    "cancer_type": "Non-Small Cell Lung Cancer",
+    # Use the same subtype-suffixed format the frontend submits, to validate
+    # canonical_search_term normalization works end-to-end.
+    "cancer_type": "Non-Small Cell Lung Cancer - Adenocarcinoma",
     "cancer_stage": "Stage IV",
-    "biomarkers": ["EGFR+", "PD-L1 80%"],
-    "prior_treatments": ["Carboplatin/Pemetrexed", "Pembrolizumab"],
-    "lines_of_therapy": 2,
+    "biomarkers": ["EGFR L858R+ (Exon 21)", "PD-L1 40%"],
+    "prior_treatments": ["Carboplatin/Pemetrexed"],
+    "lines_of_therapy": 1,
     "age": 62,
     "sex": "male",
     "ecog_score": 1,

@@ -351,6 +351,72 @@ def is_radiation_or_observational_only(intervention_types: set[str]) -> bool:
     return intervention_types.issubset(non_therapeutic)
 
 
+def canonical_search_term(patient_cancer_type: str) -> str:
+    """Map a patient's cancer_type to a canonical search-friendly string.
+
+    ClinicalTrials.gov search is keyword-based — patient inputs like
+    "Non-Small Cell Lung Cancer - Adenocarcinoma" return fewer results
+    than the canonical "Non-Small Cell Lung Cancer". This function strips
+    subtype suffixes and maps to the most search-effective canonical form.
+
+    Used ONLY for the search API query. The original patient.cancer_type
+    is preserved for display and downstream matching.
+    """
+    if not patient_cancer_type:
+        return patient_cancer_type
+    clean = patient_cancer_type.strip()
+    lower = clean.lower()
+
+    # Strip common subtype suffixes after a dash
+    # e.g., "Non-Small Cell Lung Cancer - Adenocarcinoma" → "Non-Small Cell Lung Cancer"
+    for sep in [" - ", " – ", " — "]:
+        if sep in clean:
+            base = clean.split(sep, 1)[0].strip()
+            if len(base) >= 5:  # don't strip if base is too short
+                clean = base
+                lower = clean.lower()
+                break
+
+    # Map to canonical search term by detecting cancer family
+    if any(p in lower for p in ["non-small cell lung", "non small cell lung", "nsclc"]):
+        return "Non-Small Cell Lung Cancer"
+    if "lung adenocarcinoma" in lower or "lung squamous" in lower:
+        return "Non-Small Cell Lung Cancer"
+    if "small cell lung" in lower or "sclc" in lower:
+        return "Small Cell Lung Cancer"
+    if "lung" in lower and "cancer" in lower:
+        return "Lung Cancer"
+    if "triple negative breast" in lower or "tnbc" in lower:
+        return "Triple Negative Breast Cancer"
+    if "breast" in lower and ("cancer" in lower or "carcinoma" in lower):
+        return "Breast Cancer"
+    if "colorectal" in lower or "colon cancer" in lower or "rectal cancer" in lower:
+        return "Colorectal Cancer"
+    if "prostate" in lower:
+        return "Prostate Cancer"
+    if "pancreatic" in lower or "pdac" in lower:
+        return "Pancreatic Cancer"
+    if "ovarian" in lower:
+        return "Ovarian Cancer"
+    if "hepatocellular" in lower or "hcc" in lower:
+        return "Hepatocellular Carcinoma"
+    if "renal cell" in lower or "rcc" in lower:
+        return "Renal Cell Carcinoma"
+    if "melanoma" in lower:
+        return "Melanoma"
+    if "glioblastoma" in lower or "gbm" in lower:
+        return "Glioblastoma"
+    if "myeloma" in lower:
+        return "Multiple Myeloma"
+    if "leukemia" in lower:
+        return "Leukemia"
+    if "lymphoma" in lower:
+        return "Lymphoma"
+
+    # No mapping — return the (possibly de-suffixed) input
+    return clean
+
+
 def cancer_type_matches(
     patient_cancer_type: str,
     trial_conditions: list[str],

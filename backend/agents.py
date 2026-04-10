@@ -445,8 +445,23 @@ class MatchingAgent(BaseAgent):
         return scratchpad.state.get("trials_pool", {}), scratchpad.state.get("analyses", {})
 
     async def _do_search(self, patient: PatientProfile) -> dict:
-        """Core search logic: biomarker-targeted + broad search, merged and deduplicated."""
+        """Core search logic: biomarker-targeted + broad search, merged and deduplicated.
+
+        The cancer_type is normalized to a canonical search term to avoid
+        ClinicalTrials.gov keyword-search misses on subtype-suffixed inputs
+        (e.g., "Non-Small Cell Lung Cancer - Adenocarcinoma" returns far
+        fewer results than the canonical "Non-Small Cell Lung Cancer").
+        """
+        from tools.trial_classifier import canonical_search_term
+
         query_intr, query_term = biomarker_search_terms(patient.biomarkers or [])
+        search_cancer_type = canonical_search_term(patient.cancer_type)
+        if search_cancer_type != patient.cancer_type:
+            logger.info(
+                "matching.cancer_type_normalized",
+                original=patient.cancer_type,
+                canonical=search_cancer_type,
+            )
 
         # If we have actionable biomarkers, run a targeted search AND a broad search
         # concurrently, then merge. This ensures we get biomarker-specific trials
@@ -456,7 +471,7 @@ class MatchingAgent(BaseAgent):
 
             targeted, broad = await asyncio.gather(
                 search_and_merge_tool(
-                    cancer_type=patient.cancer_type,
+                    cancer_type=search_cancer_type,
                     age=patient.age,
                     sex=patient.sex,
                     page_size=20,
@@ -465,7 +480,7 @@ class MatchingAgent(BaseAgent):
                     include_nci=True,
                 ),
                 search_and_merge_tool(
-                    cancer_type=patient.cancer_type,
+                    cancer_type=search_cancer_type,
                     age=patient.age,
                     sex=patient.sex,
                     page_size=20,
@@ -485,7 +500,7 @@ class MatchingAgent(BaseAgent):
 
         # No actionable biomarkers — single broad search
         result = await search_and_merge_tool(
-            cancer_type=patient.cancer_type,
+            cancer_type=search_cancer_type,
             age=patient.age,
             sex=patient.sex,
             page_size=20,
@@ -665,10 +680,14 @@ class MatchingAgent(BaseAgent):
         if budget.searches_remaining <= 0:
             return "Search budget exhausted", False
 
+        from tools.trial_classifier import canonical_search_term
+
         patient = scratchpad.state["patient"]
         params = decision.params
+        # Normalize cancer_type to canonical form for ClinicalTrials.gov search
+        raw_cond = params.get("query_cond", patient.cancer_type)
         result = await search_and_merge_tool(
-            cancer_type=params.get("query_cond", patient.cancer_type),
+            cancer_type=canonical_search_term(raw_cond),
             age=patient.age,
             sex=patient.sex,
             page_size=params.get("page_size", 20),
