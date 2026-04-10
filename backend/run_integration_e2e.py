@@ -97,7 +97,7 @@ async def test_matching_agent(session: AsyncSession, patient: PatientProfileDB) 
         session,
         "matching",
         patient.id,
-        input_data={"patient": patient_data, "max_results": 3},
+        input_data={"max_results": 3},
     )
 
     print(f"  Task ID:    {task.id}")
@@ -160,7 +160,6 @@ async def test_dossier_agent(
         "dossier",
         patient.id,
         input_data={
-            "patient": matching_task.input_data["patient"],
             "match": target_match,
             "nct_id": nct_id,
             "patient_summary": matching_task.output_data.get("patient_summary", ""),

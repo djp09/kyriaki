@@ -10,7 +10,7 @@ import pytest
 
 from agent_loop import Scratchpad
 from agents import AgentContext, EnrollmentAgent, MonitorAgent, OutreachAgent
-from models import EnrollmentRequest, GateResolution, MonitorRequest, OutreachRequest
+from models import EnrollmentRequest, GateResolution, MonitorRequest, OutreachRequest, PatientProfile
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -56,6 +56,26 @@ def sample_dossier():
     }
 
 
+_MOCK_PATIENT = PatientProfile(
+    cancer_type="Triple Negative Breast Cancer",
+    cancer_stage="Stage IV",
+    biomarkers=["ER-", "PR-", "HER2-"],
+    prior_treatments=["AC-T"],
+    lines_of_therapy=1,
+    age=45,
+    sex="female",
+    ecog_score=0,
+    location_zip="90210",
+    willing_to_travel_miles=100,
+)
+
+
+@pytest.fixture(autouse=True)
+def _mock_patient_loader():
+    with patch("agents.load_patient_from_db", AsyncMock(return_value=_MOCK_PATIENT)):
+        yield
+
+
 def _make_ctx(input_data):
     emitted = []
 
@@ -77,7 +97,6 @@ class TestEnrollmentAgent:
         agent = EnrollmentAgent()
         ctx, emitted = _make_ctx(
             {
-                "patient": sample_patient,
                 "dossier": sample_dossier,
                 "trial_nct_id": "NCT05107674",
             }
@@ -113,7 +132,6 @@ class TestEnrollmentAgent:
         agent = EnrollmentAgent()
         ctx, _ = _make_ctx(
             {
-                "patient": sample_patient,
                 "dossier": sample_dossier,
                 "trial_nct_id": "NCT_NONEXISTENT",
             }

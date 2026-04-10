@@ -14,10 +14,13 @@ from db_models import (
     HumanGateDB,
     MatchResultDB,
     MatchSessionDB,
+    PatientPipelineDB,
     PatientProfileDB,
     PatientProfileVersionDB,
+    TrialOutcomeDB,
+    TrialWatchDB,
 )
-from phi.audit import ACTION_READ, ACTION_WRITE, record_phi_access
+from phi.audit import ACTION_DELETE, ACTION_READ, ACTION_WRITE, record_phi_access
 
 _AUDIT_ACTOR_DEFAULT = "system"
 
@@ -184,6 +187,57 @@ async def get_patient_versions(session: AsyncSession, patient_id: UUID) -> list[
     )
     result = await session.execute(stmt)
     return list(result.scalars().all())
+
+
+async def delete_patient_profile(
+    session: AsyncSession,
+    patient_id: UUID,
+    *,
+    actor: str = _AUDIT_ACTOR_DEFAULT,
+    purpose: str | None = None,
+) -> bool:
+    """Delete a patient and all associated data. Returns True if found and deleted.
+
+    Cascades: versions, match sessions (+ results), tasks (+ events + gates),
+    pipeline state, trial watches, and outcomes.
+    """
+    patient = await session.get(PatientProfileDB, patient_id)
+    if patient is None:
+        return False
+
+    # Delete associated data that isn't cascade-covered by the ORM
+    for model in (TrialWatchDB, TrialOutcomeDB, PatientPipelineDB):
+        stmt = select(model).where(model.patient_id == patient_id)
+        result = await session.execute(stmt)
+        for row in result.scalars().all():
+            await session.delete(row)
+
+    # Delete agent tasks (cascades to events + gates via ORM)
+    stmt = select(AgentTaskDB).where(AgentTaskDB.patient_id == patient_id)
+    result = await session.execute(stmt)
+    for task in result.scalars().all():
+        await session.delete(task)
+
+    # Delete profile versions
+    stmt = select(PatientProfileVersionDB).where(PatientProfileVersionDB.patient_id == patient_id)
+    result = await session.execute(stmt)
+    for version in result.scalars().all():
+        await session.delete(version)
+
+    # Delete patient (cascades to match_sessions + match_results via ORM)
+    await session.delete(patient)
+
+    await record_phi_access(
+        session,
+        actor=actor,
+        action=ACTION_DELETE,
+        resource_type="patient_profile",
+        resource_id=str(patient_id),
+        purpose=purpose or "patient data deletion request",
+    )
+
+    await session.flush()
+    return True
 
 
 async def save_match_session(

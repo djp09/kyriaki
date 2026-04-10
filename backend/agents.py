@@ -100,6 +100,32 @@ class AgentResult:
     gate_request: GateRequest | None = None
 
 
+async def load_patient_from_db(patient_id: uuid.UUID) -> PatientProfile:
+    """Load a patient profile from DB by ID. Used by agents to avoid storing PHI in task input_data."""
+    from database import async_session
+    from db_service import read_patient_profile
+
+    async with async_session() as session:
+        patient_db = await read_patient_profile(session, patient_id, purpose="agent_execution")
+        if patient_db is None:
+            raise ValueError(f"Patient {patient_id} not found")
+        return PatientProfile(
+            cancer_type=patient_db.cancer_type,
+            cancer_stage=patient_db.cancer_stage,
+            biomarkers=patient_db.biomarkers or [],
+            prior_treatments=patient_db.prior_treatments or [],
+            lines_of_therapy=patient_db.lines_of_therapy,
+            age=patient_db.age,
+            sex=patient_db.sex,
+            ecog_score=patient_db.ecog_score,
+            key_labs=patient_db.key_labs,
+            location_zip=patient_db.location_zip,
+            willing_to_travel_miles=patient_db.willing_to_travel_miles,
+            additional_conditions=patient_db.additional_conditions or [],
+            additional_notes=patient_db.additional_notes,
+        )
+
+
 class BaseAgent(ABC):
     agent_type: ClassVar[str]
 
@@ -263,7 +289,7 @@ class MatchingAgent(BaseAgent):
         except Exception as e:
             return AgentResult(success=False, error=f"Invalid input: {e}")
 
-        patient = PatientProfile(**inputs.patient)
+        patient = await load_patient_from_db(ctx.patient_id)
         max_results = inputs.max_results
         settings = get_settings()
 
@@ -1135,6 +1161,9 @@ class DossierAgent(BaseAgent):
         except Exception as e:
             return AgentResult(success=False, error=f"Invalid input: {e}")
 
+        patient = await load_patient_from_db(ctx.patient_id)
+        patient_dict = patient.model_dump()
+
         settings = get_settings()
         nct_id = inputs.nct_id
         match = inputs.match
@@ -1143,7 +1172,7 @@ class DossierAgent(BaseAgent):
 
         scratchpad = Scratchpad(
             state={
-                "patient_data": inputs.patient,
+                "patient_data": patient_dict,
                 "matches": {nct_id: match},
                 "sections": {},
                 "settings": settings,
@@ -1158,7 +1187,7 @@ class DossierAgent(BaseAgent):
         scratchpad = await run_agent_loop(
             orchestrator_prompt_template=DOSSIER_ORCHESTRATOR_PROMPT,
             prompt_vars={
-                "patient_json": json.dumps(inputs.patient, indent=2),
+                "patient_json": json.dumps(patient_dict, indent=2),
                 "matches_summary": trial_summary,
             },
             action_handlers=handlers,
@@ -1273,6 +1302,9 @@ class EnrollmentAgent(BaseAgent):
         except Exception as e:
             return AgentResult(success=False, error=f"Invalid input: {e}")
 
+        patient = await load_patient_from_db(ctx.patient_id)
+        patient_dict = patient.model_dump()
+
         dossier = inputs.dossier
         trial_nct_id = inputs.trial_nct_id
         section = next((s for s in dossier.get("sections", []) if s.get("nct_id") == trial_nct_id), None)
@@ -1281,7 +1313,7 @@ class EnrollmentAgent(BaseAgent):
 
         scratchpad = Scratchpad(
             state={
-                "patient_data": inputs.patient,
+                "patient_data": patient_dict,
                 "dossier": dossier,
                 "section": section,
                 "trial_nct_id": trial_nct_id,

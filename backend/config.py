@@ -2,13 +2,17 @@
 
 Loads from environment variables (KYRIAKI_ prefix) or .env file.
 Also accepts ANTHROPIC_API_KEY without prefix for backwards compatibility.
+Optionally fetches secrets from AWS Secrets Manager (set KYRIAKI_SECRETS_BACKEND=aws_secretsmanager).
 """
 
+import logging
 import os
 from functools import lru_cache
 
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+logger = logging.getLogger(__name__)
 
 
 class Settings(BaseSettings):
@@ -21,6 +25,11 @@ class Settings(BaseSettings):
 
     # Database
     database_url: str = "postgresql+asyncpg://kyriaki:kyriaki_dev@localhost:5432/kyriaki"
+
+    # Secrets backend
+    secrets_backend: str = "env"  # "env" (default) or "aws_secretsmanager"
+    aws_secret_name: str = "kyriaki/api-keys"
+    aws_region: str = "us-east-1"
 
     # Claude API
     anthropic_api_key: str = ""
@@ -76,6 +85,10 @@ class Settings(BaseSettings):
     trial_refresh_enabled: bool = False  # Enable nightly background refresh
     trial_refresh_hour: int = 2  # Hour (UTC) to run nightly refresh
 
+    # API key auth
+    api_key: str = ""  # The key clients must provide; empty = no key configured
+    api_key_enabled: bool = False  # Explicit toggle; False = auth disabled (dev mode)
+
     # Server
     cors_origins: list[str] = ["http://localhost:5173", "http://localhost:3000"]
     log_level: str = "INFO"
@@ -87,6 +100,57 @@ class Settings(BaseSettings):
         """Accept ANTHROPIC_API_KEY without the KYRIAKI_ prefix (backwards compat with .env)."""
         if not self.anthropic_api_key:
             self.anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        return self
+
+    @model_validator(mode="after")
+    def _load_secrets_from_aws(self):
+        """If secrets_backend is 'aws_secretsmanager' and keys are missing, fetch from AWS."""
+        if self.secrets_backend != "aws_secretsmanager":
+            return self
+        if self.anthropic_api_key:
+            return self  # already populated, nothing to fetch
+
+        try:
+            import boto3  # noqa: F811
+            from botocore.exceptions import ClientError
+        except ImportError:
+            logger.warning(
+                "secrets_backend=aws_secretsmanager but boto3 is not installed; falling back to environment variables"
+            )
+            return self
+
+        try:
+            client = boto3.client("secretsmanager", region_name=self.aws_region)
+            resp = client.get_secret_value(SecretId=self.aws_secret_name)
+        except ClientError as exc:
+            logger.warning(
+                "Failed to fetch secret '%s' from AWS Secrets Manager: %s; falling back to environment variables",
+                self.aws_secret_name,
+                exc,
+            )
+            return self
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Unexpected error fetching from AWS Secrets Manager: %s; falling back to environment variables",
+                exc,
+            )
+            return self
+
+        import json
+
+        try:
+            secrets = json.loads(resp["SecretString"])
+        except (json.JSONDecodeError, KeyError) as exc:
+            logger.warning(
+                "Could not parse secret '%s' as JSON: %s; falling back to environment variables",
+                self.aws_secret_name,
+                exc,
+            )
+            return self
+
+        if not self.anthropic_api_key and "ANTHROPIC_API_KEY" in secrets:
+            self.anthropic_api_key = secrets["ANTHROPIC_API_KEY"]
+
         return self
 
 

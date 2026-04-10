@@ -363,7 +363,7 @@ class TestEndpoints:
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "accepted"
-        assert data["patient"]["cancer_type"] == "Non-Small Cell Lung Cancer"
+        assert "patient_id" in data  # returns patient_id, not full PHI
 
     def test_intake_invalid_age(self, client):
         resp = client.post("/api/intake", json=_valid_patient(age=200))

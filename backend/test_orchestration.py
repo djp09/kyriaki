@@ -28,6 +28,7 @@ from models import (
     EventResponse,
     GateResolution,
     GateResponse,
+    PatientProfile,
     TaskDetailResponse,
     TaskResponse,
 )
@@ -82,6 +83,26 @@ def sample_match_output():
         ],
         "total_trials_screened": 5,
     }
+
+
+_MOCK_PATIENT = PatientProfile(
+    cancer_type="Non-Small Cell Lung Cancer",
+    cancer_stage="Stage IV",
+    biomarkers=["EGFR+", "PD-L1 80%"],
+    prior_treatments=["Carboplatin/Pemetrexed"],
+    lines_of_therapy=1,
+    age=62,
+    sex="male",
+    ecog_score=1,
+    location_zip="10001",
+    willing_to_travel_miles=50,
+)
+
+
+@pytest.fixture
+def mock_patient_loader():
+    with patch("agents.load_patient_from_db", AsyncMock(return_value=_MOCK_PATIENT)):
+        yield
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +196,7 @@ class FakeSession:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("mock_patient_loader")
 class TestDispatcher:
     @pytest.mark.asyncio
     async def test_dispatch_unknown_agent_raises(self):
@@ -198,9 +220,7 @@ class TestDispatcher:
             patch.object(MatchingAgent, "_do_prescreen_and_analyze", AsyncMock(return_value=mock_analyses)),
             patch("agents.claude_text_call", mock_summary),
         ):
-            task = await dispatch(
-                session, "matching", patient_id, input_data={"patient": sample_patient_data, "max_results": 10}
-            )
+            task = await dispatch(session, "matching", patient_id, input_data={"max_results": 10})
 
         assert task.status == TaskStatus.completed.value
         assert task.output_data["patient_summary"] == "Summary"
@@ -220,9 +240,7 @@ class TestDispatcher:
 
         mock_search = AsyncMock(side_effect=RuntimeError("API down"))
         with patch("agents.search_and_merge_tool", mock_search):
-            task = await dispatch(
-                session, "matching", patient_id, input_data={"patient": sample_patient_data, "max_results": 10}
-            )
+            task = await dispatch(session, "matching", patient_id, input_data={"max_results": 10})
 
         assert task.status == TaskStatus.failed.value
         assert "RuntimeError" in task.error
@@ -258,7 +276,6 @@ class TestDispatcher:
                 "dossier",
                 patient_id,
                 input_data={
-                    "patient": sample_patient_data,
                     "match": sample_match_output["matches"][0],
                     "nct_id": sample_match_output["matches"][0]["nct_id"],
                     "patient_summary": "Summary",
@@ -293,7 +310,7 @@ class TestDispatcher:
                 session,
                 "matching",
                 patient_id,
-                input_data={"patient": sample_patient_data, "max_results": 5},
+                input_data={"max_results": 5},
                 parent_task_id=parent_id,
             )
 
@@ -305,6 +322,7 @@ class TestDispatcher:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("mock_patient_loader")
 class TestMatchingAgent:
     @pytest.mark.asyncio
     async def test_execute_returns_matches(self, sample_patient_data):
@@ -318,7 +336,7 @@ class TestMatchingAgent:
         ctx = AgentContext(
             task_id=uuid.uuid4(),
             patient_id=uuid.uuid4(),
-            input_data={"patient": sample_patient_data, "max_results": 5},
+            input_data={"max_results": 5},
             emit=mock_emit,
         )
 
@@ -347,9 +365,7 @@ class TestMatchingAgent:
         async def mock_emit(event_type, data=None):
             pass
 
-        ctx = AgentContext(
-            task_id=uuid.uuid4(), patient_id=uuid.uuid4(), input_data={"patient": sample_patient_data}, emit=mock_emit
-        )
+        ctx = AgentContext(task_id=uuid.uuid4(), patient_id=uuid.uuid4(), input_data={}, emit=mock_emit)
 
         mock_search = AsyncMock(side_effect=RuntimeError("boom"))
         with (
@@ -364,6 +380,7 @@ class TestMatchingAgent:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("mock_patient_loader")
 class TestDossierAgent:
     @pytest.mark.asyncio
     async def test_execute_produces_dossier_and_gate(self, sample_patient_data, sample_match_output):
@@ -378,7 +395,6 @@ class TestDossierAgent:
             task_id=uuid.uuid4(),
             patient_id=uuid.uuid4(),
             input_data={
-                "patient": sample_patient_data,
                 "match": sample_match_output["matches"][0],
                 "nct_id": sample_match_output["matches"][0]["nct_id"],
                 "patient_summary": "Summary",
@@ -424,7 +440,6 @@ class TestDossierAgent:
             task_id=uuid.uuid4(),
             patient_id=uuid.uuid4(),
             input_data={
-                "patient": sample_patient_data,
                 "match": sample_match_output["matches"][0],
                 "nct_id": sample_match_output["matches"][0]["nct_id"],
                 "patient_summary": "Summary",
@@ -506,14 +521,13 @@ class TestDBModels:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("mock_patient_loader")
 class TestBackgroundDispatch:
     @pytest.mark.asyncio
     async def test_dispatch_background_returns_pending(self, sample_patient_data):
         session = FakeSession()
         patient_id = uuid.uuid4()
-        task = await dispatch_background(
-            session, "matching", patient_id, input_data={"patient": sample_patient_data, "max_results": 5}
-        )
+        task = await dispatch_background(session, "matching", patient_id, input_data={"max_results": 5})
         assert task.status == TaskStatus.pending.value
         assert task.id is not None
 
@@ -527,7 +541,7 @@ class TestBackgroundDispatch:
     async def test_dispatch_background_spawns_task(self, sample_patient_data):
         session = FakeSession()
         patient_id = uuid.uuid4()
-        task = await dispatch_background(session, "matching", patient_id, input_data={"patient": sample_patient_data})
+        task = await dispatch_background(session, "matching", patient_id, input_data={"max_results": 10})
         assert task.agent_type == "matching"
         assert task.patient_id == patient_id
 
@@ -744,6 +758,7 @@ class TestToolUse:
         assert "query_cond" in search.parameters["required"]
 
 
+@pytest.mark.usefixtures("mock_patient_loader")
 class TestTokenTracking:
     def test_token_usage_total(self):
         usage = TokenUsage(input_tokens=100, output_tokens=50)
@@ -782,7 +797,7 @@ class TestTokenTracking:
         ctx = AgentContext(
             task_id=uuid.uuid4(),
             patient_id=uuid.uuid4(),
-            input_data={"patient": sample_patient_data, "max_results": 5},
+            input_data={"max_results": 5},
             emit=mock_emit,
         )
 
@@ -809,6 +824,7 @@ class TestTokenTracking:
 
 
 @pytest.mark.skipif(_is_postgres, reason="Uses SQLite test DB")
+@pytest.mark.usefixtures("mock_patient_loader")
 class TestDuplicateDispatchGuard:
     @pytest_asyncio.fixture
     async def db_session(self):

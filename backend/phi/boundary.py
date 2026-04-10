@@ -32,6 +32,7 @@ class ExternalPayload:
     max_tokens: int
     messages: list[dict[str, Any]]
     tools: list[Any] | None = None
+    system: list[dict[str, Any]] | None = None
     redaction_report: dict[str, int] = field(default_factory=dict)
 
 
@@ -99,6 +100,36 @@ def _scrub_tool_block(
     return out
 
 
+def _scrub_system_blocks(
+    system: str | list[dict[str, Any]],
+    report: dict[str, int],
+) -> list[dict[str, Any]]:
+    """Scrub and normalise a system prompt into a list of content blocks.
+
+    Accepts either a plain string or a list of Anthropic-style content blocks.
+    Returns a list of text blocks with PHI scrubbed.
+    """
+    if isinstance(system, str):
+        cleaned = _scrub_text_block(system, report)
+        return [{"type": "text", "text": cleaned}]
+
+    if not isinstance(system, list):
+        raise PHIBoundaryViolation(f"system must be a str or list, got {type(system).__name__}")
+
+    blocks: list[dict[str, Any]] = []
+    for block in system:
+        if not isinstance(block, dict):
+            raise PHIBoundaryViolation(f"System block must be a dict, got {type(block).__name__}")
+        if block.get("type") != "text":
+            raise PHIBoundaryViolation(
+                f"Only text blocks are allowed in system prompts, got {block.get('type')!r}"
+            )
+        cleaned = _scrub_text_block(block.get("text", ""), report)
+        new_block = {**block, "text": cleaned}
+        blocks.append(new_block)
+    return blocks
+
+
 def to_external_llm(
     *,
     model: str,
@@ -106,6 +137,7 @@ def to_external_llm(
     messages: list[dict[str, Any]],
     tools: list[Any] | None = None,
     allow_binary: bool = False,
+    system: str | list[dict[str, Any]] | None = None,
 ) -> ExternalPayload:
     """Convert an internal message list into a de-identified external payload.
 
@@ -125,6 +157,9 @@ def to_external_llm(
             to pass through unscrubbed. Use only for explicit user-uploaded
             documents where the user has consented and the binary cannot
             be scrubbed at the text layer. Requires an informed caller.
+        system: optional system prompt — a plain string or a list of
+            Anthropic-style text content blocks. Scrubbed through the PHI
+            boundary just like messages.
 
     Raises:
         PHIBoundaryViolation: if a content block cannot be safely handled.
@@ -153,10 +188,15 @@ def to_external_llm(
         else:
             raise PHIBoundaryViolation(f"Unsupported message content type: {type(content).__name__}")
 
+    sanitised_system: list[dict[str, Any]] | None = None
+    if system is not None:
+        sanitised_system = _scrub_system_blocks(system, report)
+
     return ExternalPayload(
         model=model,
         max_tokens=max_tokens,
         messages=sanitised,
         tools=tools,
+        system=sanitised_system,
         redaction_report=report,
     )

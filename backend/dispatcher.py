@@ -289,7 +289,6 @@ async def _execute_task(
                         "dossier",
                         patient_id,
                         {
-                            "patient": input_data.get("patient", {}),
                             "matches": matches,
                             "patient_summary": result.output_data.get("patient_summary", ""),
                         },

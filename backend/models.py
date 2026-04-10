@@ -23,16 +23,17 @@ class CriterionEvaluation(BaseModel):
     criterion: str
     criterion_id: str = ""
     type: str = ""  # "inclusion" or "exclusion"
-    status: str  # "MET", "NOT_MET", "INSUFFICIENT_INFO" (inclusion) / "TRIGGERED", "NOT_TRIGGERED", "INSUFFICIENT_INFO" (exclusion)
-    confidence: str | None = "MEDIUM"  # "HIGH", "MEDIUM", "LOW"
-    explanation: str
+    status: str = "INSUFFICIENT_INFO"  # "MET", "NOT_MET", "INSUFFICIENT_INFO" / "TRIGGERED", "NOT_TRIGGERED"
+    confidence: str = "MEDIUM"  # "HIGH", "MEDIUM", "LOW"
+    explanation: str = ""
     patient_data_used: list[str] = Field(default_factory=list)
 
-    @field_validator("confidence", mode="before")
+    @field_validator("status", "confidence", mode="before")
     @classmethod
-    def coerce_confidence(cls, v: object) -> str:
+    def coerce_to_str(cls, v: object, info) -> str:
         if v is None or v == "":
-            return "MEDIUM"
+            defaults = {"status": "INSUFFICIENT_INFO", "confidence": "MEDIUM"}
+            return defaults.get(info.field_name, "")
         return str(v)
 
 
@@ -82,14 +83,12 @@ class MatchResponse(BaseModel):
 class MatchingInput(BaseModel):
     """Input schema for MatchingAgent."""
 
-    patient: dict
     max_results: int = Field(default=10, ge=1, le=50)
 
 
 class DossierInput(BaseModel):
     """Input schema for DossierAgent — single trial analysis."""
 
-    patient: dict
     match: dict  # single match to deep-analyze
     nct_id: str
     patient_summary: str = ""
@@ -98,7 +97,6 @@ class DossierInput(BaseModel):
 class EnrollmentInput(BaseModel):
     """Input schema for EnrollmentAgent."""
 
-    patient: dict
     dossier: dict
     trial_nct_id: str
 
@@ -108,7 +106,6 @@ class OutreachInput(BaseModel):
 
     outreach_draft: dict = Field(default_factory=dict)
     trial_nct_id: str = ""
-    patient: dict = Field(default_factory=dict)
 
 
 class MonitorInput(BaseModel):

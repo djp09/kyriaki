@@ -43,11 +43,17 @@ async def call_claude_with_retry(
     max_retries: int = 3,
     tools: list | None = None,
     allow_binary: bool = False,
+    system: str | list[dict] | None = None,
 ) -> anthropic.types.Message:
     """Call Claude with exponential backoff on rate limits.
 
     All outgoing payloads are routed through ``phi.boundary.to_external_llm``
     which enforces HIPAA Safe Harbor de-identification. See ADR-004.
+
+    When *system* is provided it is sent as the ``system`` parameter to the
+    Anthropic API with ``cache_control: {"type": "ephemeral"}`` on the last
+    block, enabling prompt caching for repeated calls that share the same
+    system prompt.
     """
     payload = to_external_llm(
         model=model,
@@ -55,9 +61,17 @@ async def call_claude_with_retry(
         messages=messages,
         tools=tools,
         allow_binary=allow_binary,
+        system=system,
     )
     if payload.redaction_report:
         logger.info("phi.boundary.redacted", **payload.redaction_report)
+
+    # Apply cache_control to the last system block for Anthropic prompt caching
+    system_blocks = None
+    if payload.system:
+        system_blocks = [dict(b) for b in payload.system]
+        system_blocks[-1]["cache_control"] = {"type": "ephemeral"}
+
     for attempt in range(max_retries):
         try:
             create_kwargs = {
@@ -67,6 +81,8 @@ async def call_claude_with_retry(
             }
             if payload.tools:
                 create_kwargs["tools"] = payload.tools
+            if system_blocks:
+                create_kwargs["system"] = system_blocks
             return await client.messages.create(**create_kwargs)
         except anthropic.RateLimitError:
             if attempt == max_retries - 1:
@@ -176,6 +192,7 @@ async def paced_claude_call(
     messages: list,
     tools: list | None = None,
     allow_binary: bool = False,
+    system: str | list[dict] | None = None,
 ) -> anthropic.types.Message:
     """Call Claude with adaptive concurrency limiting.
 
@@ -192,6 +209,7 @@ async def paced_claude_call(
             messages=messages,
             tools=tools,
             allow_binary=allow_binary,
+            system=system,
         )
         await limiter.on_success()
         return result
@@ -312,20 +330,28 @@ def extract_minimal_result(text: str, nct_id: str) -> dict | None:
 
 
 def _extract_token_usage(response: anthropic.types.Message) -> TokenUsage:
-    """Extract token usage from a Claude API response."""
+    """Extract token usage from a Claude API response, including cache metrics."""
     usage = getattr(response, "usage", None)
     if usage is None:
         return TokenUsage()
     return TokenUsage(
         input_tokens=getattr(usage, "input_tokens", 0),
         output_tokens=getattr(usage, "output_tokens", 0),
+        cache_creation_input_tokens=getattr(usage, "cache_creation_input_tokens", 0) or 0,
+        cache_read_input_tokens=getattr(usage, "cache_read_input_tokens", 0) or 0,
     )
 
 
 # --- High-level tool functions ---
 
 
-async def claude_json_call(prompt: str, *, model: str | None = None, max_tokens: int = 1500) -> ToolResult:
+async def claude_json_call(
+    prompt: str,
+    *,
+    model: str | None = None,
+    max_tokens: int = 1500,
+    system: str | list[dict] | None = None,
+) -> ToolResult:
     """Call Claude and parse the response as JSON. Returns ToolResult with token_usage."""
     settings = get_settings()
     model = model or settings.claude_model
@@ -335,6 +361,7 @@ async def claude_json_call(prompt: str, *, model: str | None = None, max_tokens:
             model=model,
             max_tokens=max_tokens,
             messages=[{"role": "user", "content": prompt}],
+            system=system,
         )
         tokens = _extract_token_usage(response)
         result = parse_json_response(response.content[0].text)
@@ -345,7 +372,13 @@ async def claude_json_call(prompt: str, *, model: str | None = None, max_tokens:
         return ToolResult(success=False, error=f"{type(e).__name__}: {e}")
 
 
-async def claude_text_call(prompt: str, *, model: str | None = None, max_tokens: int = 300) -> ToolResult:
+async def claude_text_call(
+    prompt: str,
+    *,
+    model: str | None = None,
+    max_tokens: int = 300,
+    system: str | list[dict] | None = None,
+) -> ToolResult:
     """Call Claude and return plain text response. Returns ToolResult with token_usage."""
     settings = get_settings()
     model = model or settings.claude_model
@@ -355,6 +388,7 @@ async def claude_text_call(prompt: str, *, model: str | None = None, max_tokens:
             model=model,
             max_tokens=max_tokens,
             messages=[{"role": "user", "content": prompt}],
+            system=system,
         )
         tokens = _extract_token_usage(response)
         return ToolResult(success=True, data=response.content[0].text.strip(), token_usage=tokens)

@@ -19,10 +19,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import agents as _agents  # noqa: F401 — triggers agent registration
+from auth import require_api_key
 from config import get_settings
 from database import async_session, get_db
 from db_models import AgentEventDB, AgentTaskDB, HumanGateDB, TaskStatus, TrialWatchDB
 from db_service import (
+    delete_patient_profile,
     get_patient_activity,
     get_patient_versions,
     get_task_with_gates,
@@ -174,7 +176,12 @@ async def lifespan(app: FastAPI):
     await close_http_client()
 
 
-app = FastAPI(title="Kyriaki", description="Clinical trial matching engine for cancer patients", lifespan=lifespan)
+app = FastAPI(
+    title="Kyriaki",
+    description="Clinical trial matching engine for cancer patients",
+    lifespan=lifespan,
+    dependencies=[Depends(require_api_key)],
+)
 
 app.add_middleware(RequestLoggingMiddleware)
 
@@ -203,7 +210,8 @@ async def validation_error_handler(request: Request, exc: ValidationError):
 
 @app.exception_handler(Exception)
 async def general_exception_handler(request: Request, exc: Exception):
-    logger.error("unhandled_exception", exc_type=type(exc).__name__, error=str(exc), exc_info=True)
+    # Log only exception type — str(exc) may contain PHI from patient data in locals
+    logger.error("unhandled_exception", exc_type=type(exc).__name__, path=request.url.path)
     return _error_response(500, "Something went wrong on our end. Please try again in a moment.")
 
 
@@ -219,8 +227,9 @@ async def health():
 
 
 @app.post("/api/intake")
-async def intake(patient: PatientProfile):
-    return {"status": "accepted", "patient": patient}
+async def intake(patient: PatientProfile, db: AsyncSession = Depends(get_db)):
+    saved = await save_patient_profile(db, patient.model_dump())
+    return {"status": "accepted", "patient_id": str(saved.id)}
 
 
 @app.post("/api/match", response_model=MatchResponse)
@@ -369,7 +378,7 @@ async def agent_match(request: MatchRequest, db: AsyncSession = Depends(get_db))
         db,
         "matching",
         patient.id,
-        input_data={"patient": patient_data, "max_results": request.max_results},
+        input_data={"max_results": request.max_results},
     )
     return _task_to_response(task)
 
@@ -414,7 +423,6 @@ async def agent_dossier(request: DossierRequest, db: AsyncSession = Depends(get_
         "dossier",
         matching_task.patient_id,
         input_data={
-            "patient": matching_task.input_data["patient"],
             "match": match,
             "nct_id": request.nct_id,
             "patient_summary": matching_task.output_data.get("patient_summary", ""),
@@ -525,7 +533,6 @@ async def agent_enrollment(request: EnrollmentRequest, db: AsyncSession = Depend
         "enrollment",
         dossier_task.patient_id,
         input_data={
-            "patient": dossier_task.input_data.get("patient", {}),
             "dossier": dossier_task.output_data.get("dossier", {}),
             "trial_nct_id": request.trial_nct_id,
         },
@@ -546,7 +553,6 @@ async def agent_outreach(request: OutreachRequest, db: AsyncSession = Depends(ge
         enrollment_task.patient_id,
         input_data={
             **enrollment_task.output_data,
-            "patient": enrollment_task.input_data.get("patient", {}),
         },
         parent_task_id=enrollment_task.id,
     )
@@ -613,7 +619,11 @@ async def download_dossier_pdf(task_id: str, db: AsyncSession = Depends(get_db))
     if not dossier:
         raise HTTPException(404, "No dossier data found in task output")
 
-    patient_data = task.input_data.get("patient")
+    # Load patient from DB instead of task input_data (PHI dedup)
+    from db_service import read_patient_profile
+
+    patient_db = await read_patient_profile(db, task.patient_id)
+    patient_data = patient_db.__dict__ if patient_db else None
     result = render_dossier_pdf(dossier, patient_data)
     if not result.success:
         raise HTTPException(500, f"PDF generation failed: {result.error}")
@@ -668,7 +678,6 @@ async def resolve_gate(gate_id: str, resolution: GateResolution, db: AsyncSessio
                     "enrollment",
                     task.patient_id,
                     input_data={
-                        "patient": task.input_data.get("patient", {}),
                         "dossier": dossier,
                         "trial_nct_id": chain_trial,
                     },
@@ -682,7 +691,7 @@ async def resolve_gate(gate_id: str, resolution: GateResolution, db: AsyncSessio
                 db,
                 "outreach",
                 task.patient_id,
-                input_data={**task.output_data, "patient": task.input_data.get("patient", {})},
+                input_data={**task.output_data},
                 parent_task_id=task.id,
             )
 
@@ -725,6 +734,16 @@ async def update_profile(patient_id: str, patient: PatientProfile, db: AsyncSess
     if not updated:
         raise HTTPException(404, "Patient not found")
     return {"status": "updated", "version": updated.version}
+
+
+@app.delete("/api/patients/{patient_id}")
+async def delete_patient(patient_id: str, db: AsyncSession = Depends(get_db)):
+    """Delete a patient and all associated data. Emits audit log entry."""
+    pid = _parse_uuid(patient_id)
+    deleted = await delete_patient_profile(db, pid)
+    if not deleted:
+        raise HTTPException(404, "Patient not found")
+    return {"status": "deleted", "patient_id": patient_id}
 
 
 @app.get("/api/patients/{patient_id}/versions")
