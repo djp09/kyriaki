@@ -16,17 +16,32 @@ from tools import ToolResult, ToolSpec, register_tool
 logger = get_logger("kyriaki.tools.scoring")
 
 
-def calculate_match_score(evaluations: list[dict], flags: list[str] | None = None) -> dict:
+def calculate_match_score(
+    evaluations: list[dict],
+    flags: list[str] | None = None,
+    *,
+    biomarker_aligned: bool = True,
+    intervention_types: set[str] | None = None,
+    has_actionable_genes: bool = False,
+) -> dict:
     """Calculate match score from criterion-level evaluations.
 
     Args:
         evaluations: List of criterion evaluation dicts with keys:
             criterion_id, type (inclusion/exclusion), status, confidence
         flags: Optional flags_for_oncologist from the LLM
+        biomarker_aligned: True if trial targets the patient's actionable
+            biomarkers (or patient has none). Drives the −30 penalty.
+        intervention_types: Set of category strings from trial_classifier.
+            Used to detect radiation-only mismatches and combo trials.
+        has_actionable_genes: True if patient has ≥1 actionable biomarker.
+            Required to trigger biomarker penalties.
 
     Returns:
         Dict with score, tier, criteria counts, explanation, details.
     """
+    from tools.trial_classifier import is_radiation_or_observational_only
+
     inclusion = [e for e in evaluations if e.get("type") == "inclusion"]
     exclusion = [e for e in evaluations if e.get("type") == "exclusion"]
 
@@ -109,8 +124,9 @@ def calculate_match_score(evaluations: list[dict], flags: list[str] | None = Non
     unknown = len([e for e in inclusion if e.get("status") == "INSUFFICIENT_INFO"])
     total = len(inclusion)
 
-    # Met criteria count fully, unknown count partially (0.3 weight)
-    base_score = 50.0 if total == 0 else ((met * 1.0 + unknown * 0.3) / total) * 100
+    # Met criteria count fully, unknown count partially (0.15 weight — tightened
+    # from 0.3 so incomplete data doesn't inflate scores).
+    base_score = 50.0 if total == 0 else ((met * 1.0 + unknown * 0.15) / total) * 100
 
     # --- Confidence adjustment ---
     # High-confidence MET criteria are worth more
@@ -118,8 +134,9 @@ def calculate_match_score(evaluations: list[dict], flags: list[str] | None = Non
     confidence_bonus = (high_confidence_met / max(total, 1)) * 10
 
     # --- NOT_MET penalty ---
-    # Each NOT_MET drags the score down, but cap to avoid over-penalizing
-    not_met_penalty = min(not_met * 8, 24)
+    # Each NOT_MET drags the score down. Cap raised from 24 → 40 so trials
+    # with multiple failed criteria can no longer hide in the 60s.
+    not_met_penalty = min(not_met * 10, 40)
 
     # --- Exclusion safety margin ---
     # Unknown exclusions are risky — penalize, but cap at 15 to avoid
@@ -127,10 +144,49 @@ def calculate_match_score(evaluations: list[dict], flags: list[str] | None = Non
     unknown_exclusions = len([e for e in exclusion if e.get("status") == "INSUFFICIENT_INFO"])
     exclusion_penalty = min(unknown_exclusions * 3, 15)
 
-    final_score = min(100.0, max(0.0, base_score + confidence_bonus - not_met_penalty - exclusion_penalty))
+    # --- Biomarker–therapy alignment penalties ---
+    # Layer 2 of defense-in-depth: even after the pre-filter, apply scoring
+    # penalties so any trial that slipped through gets demoted.
+    biomarker_mismatch_penalty = 30 if (has_actionable_genes and not biomarker_aligned) else 0
+
+    # Combination trials (e.g., osimertinib + radiation) are technically aligned
+    # but carry slight risk for biomarker-driven patients — soft −15 penalty.
+    combo_radiation_penalty = 0
+    if (
+        has_actionable_genes
+        and intervention_types
+        and "radiation" in intervention_types
+        and (intervention_types & {"targeted", "chemo", "immunotherapy"})
+    ):
+        combo_radiation_penalty = 15
+
+    final_score = min(
+        100.0,
+        max(
+            0.0,
+            base_score
+            + confidence_bonus
+            - not_met_penalty
+            - exclusion_penalty
+            - biomarker_mismatch_penalty
+            - combo_radiation_penalty,
+        ),
+    )
+
+    # --- Layer 3: hard cap for radiation-only mismatches ---
+    # Even if the LLM scores a radiation trial well for an EGFR+ patient,
+    # cap it at 40 so it never appears in STRONG/POTENTIAL match tiers.
+    if (
+        has_actionable_genes
+        and intervention_types
+        and is_radiation_or_observational_only(intervention_types)
+        and not biomarker_aligned
+    ):
+        final_score = min(final_score, 40.0)
 
     # --- Tier assignment ---
-    if final_score >= 75 and not_met == 0:
+    # STRONG_MATCH now requires biomarker alignment.
+    if final_score >= 75 and not_met == 0 and biomarker_aligned:
         tier = "STRONG_MATCH"
     elif final_score >= 50:
         tier = "POTENTIAL_MATCH"

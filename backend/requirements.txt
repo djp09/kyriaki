@@ -17,6 +17,8 @@ pydantic-settings>=2.7.0
 structlog>=24.4.0
 # Geocoding
 pgeocode>=0.4.0
+# BM25 for deterministic trial ranking
+rank-bm25>=0.2.2
 # PHI encryption (AES-256-GCM for at-rest patient profiles)
 cryptography>=43.0.0
 # PDF generation

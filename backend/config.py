@@ -58,6 +58,13 @@ class Settings(BaseSettings):
     max_retries: int = 3
     default_page_size: int = 10
 
+    # Quality + consistency feature flags (each independently revertible)
+    enable_deterministic_pre_filter: bool = True  # rank trials by rules+BM25 before LLM
+    enable_biomarker_alignment_cap: bool = True  # hard cap radiation-only mismatches at 40
+    enable_cancer_type_validation: bool = True  # drop trials whose conditions don't match
+    enable_tightened_scoring: bool = True  # use new scoring formula (unknown 0.15, NOT_MET cap 40)
+    deterministic_prefilter_top_k: int = 20  # MAX_PRESCREEN size after deterministic ranking
+
     # Monitor agent
     monitor_enabled: bool = False
     monitor_interval_seconds: int = 3600

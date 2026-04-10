@@ -508,66 +508,139 @@ class MatchingAgent(BaseAgent):
         biomarker_context: str,
         max_deep: int = 5,
     ) -> dict:
-        """Core prescreen + deep analysis logic. Returns analyses dict."""
+        """Core prescreen + deep analysis logic. Returns analyses dict.
+
+        Pipeline:
+        1. Deterministic pre-filter (cancer type + biomarker alignment) drops mismatches.
+        2. Deterministic ranker (rules + BM25) orders candidates — replaces dict
+           insertion order which depends on httpx race timing.
+        3. LLM prescreen (tool_use, temperature=0) picks HIGH/LOW from top 20.
+        4. Deep criterion-level analysis on HIGH-tier (parallel).
+        """
         from prompts import PRESCREEN_SYSTEM_PROMPT, PRESCREEN_USER_PROMPT
+        from tools.deterministic_rank import rank_candidates
+        from tools.trial_classifier import (
+            classify_interventions,
+            is_biomarker_aligned,
+            is_radiation_or_observational_only,
+            patient_actionable_genes,
+        )
 
         analyses: dict = {}
         if not pool:
             return analyses
 
-        MAX_PRESCREEN = 30
-        unanalyzed = dict(list(pool.items())[:MAX_PRESCREEN])
+        # --- Stage 0: deterministic pre-filter (drop hard mismatches) ---
+        genes = patient_actionable_genes(patient.biomarkers or [])
+        filtered: list[dict] = []
+        for trial in pool.values():
+            # Biomarker–therapy alignment hard filter for actionable patients
+            if genes and settings.enable_biomarker_alignment_cap:
+                itypes = classify_interventions(trial)
+                aligned, _ = is_biomarker_aligned(trial, genes)
+                if is_radiation_or_observational_only(itypes) and not aligned:
+                    logger.info(
+                        "match.pre_filtered_biomarker_mismatch",
+                        nct_id=trial.get("nct_id"),
+                        itypes=sorted(itypes),
+                        genes=sorted(genes),
+                    )
+                    analyses[trial["nct_id"]] = {
+                        "match_score": 0,
+                        "match_tier": "EXCLUDED",
+                        "match_explanation": (
+                            f"Trial does not target patient's actionable biomarkers ({', '.join(sorted(genes))})."
+                        ),
+                        "inclusion_evaluations": [],
+                        "exclusion_evaluations": [],
+                        "flags_for_oncologist": [],
+                        "criteria_met": 0,
+                        "criteria_not_met": 0,
+                        "criteria_unknown": 0,
+                        "criteria_total": 0,
+                    }
+                    continue
+            filtered.append(trial)
 
-        # --- Tier 1: Fast pre-screen ---
-        trials_list_lines = []
-        for trial in unanalyzed.values():
-            trials_list_lines.append(
-                f"- **{trial['nct_id']}**: {trial['brief_title']}\n"
-                f"  Phase: {trial['phase']} | Conditions: {', '.join(trial.get('conditions', []))}\n"
-                f"  Summary: {trial['brief_summary'][:200]}"
-            )
-
-        patient_vars = format_patient_for_prompt(patient)
-        prescreen_sys = PRESCREEN_SYSTEM_PROMPT.format(**patient_vars)
-        prescreen_user = PRESCREEN_USER_PROMPT.format(trials_list="\n".join(trials_list_lines))
-
-        rankings, high_tier_ids = await self._run_prescreen(
-            prescreen_sys, prescreen_user, list(unanalyzed.keys()), max_deep
-        )
-        for r in rankings:
-            if r.get("tier") == "LOW" and r["nct_id"] not in analyses:
-                analyses[r["nct_id"]] = {
-                    "match_score": 0,
-                    "match_tier": "EXCLUDED",
-                    "match_explanation": f"Pre-screen: {r.get('reason', 'Not relevant')}",
-                    "inclusion_evaluations": [],
-                    "exclusion_evaluations": [],
-                    "flags_for_oncologist": [],
-                    "criteria_met": 0,
-                    "criteria_not_met": 0,
-                    "criteria_unknown": 0,
-                    "criteria_total": 0,
-                }
-
-        # If pre-screen found very few HIGH candidates, force-analyze the top
-        # few anyway. The fast pre-screen can be overly aggressive for early-stage
-        # or uncommon cancer types, and a deeper criterion-level analysis may
-        # find partial matches the pre-screen missed.
-        MIN_DEEP_ANALYZE = 8
-        if len(high_tier_ids) < MIN_DEEP_ANALYZE:
-            # Add unanalyzed trials not already in high_tier_ids, preserving pool order
-            for nct_id in unanalyzed:
-                if nct_id not in high_tier_ids and nct_id not in analyses:
-                    high_tier_ids.append(nct_id)
-                if len(high_tier_ids) >= MIN_DEEP_ANALYZE:
-                    break
-
-        if not high_tier_ids:
+        if not filtered:
             return analyses
 
-        # --- Tier 2: Deep analysis on HIGH-tier ---
-        to_analyze = [unanalyzed[nid] for nid in high_tier_ids[:max_deep] if nid in unanalyzed]
+        # --- Stage 1: deterministic ranking (replaces dict iteration order) ---
+        if settings.enable_deterministic_pre_filter:
+            ranked = rank_candidates(patient, filtered, genes)
+            ordered_ids = [t["nct_id"] for t, _, _ in ranked]
+        else:
+            ordered_ids = [t["nct_id"] for t in filtered]
 
+        MAX_PRESCREEN = settings.deterministic_prefilter_top_k
+        unanalyzed = {nid: pool[nid] for nid in ordered_ids[:MAX_PRESCREEN] if nid in pool}
+
+        # --- Stage 2: pick trials for deep analysis ---
+        # When deterministic ranking is on, the ranker has all the signal we need
+        # (cancer type, biomarker alignment, targeted-drug boost, BM25). The LLM
+        # prescreen was filtering legitimate matches based on first-line vs
+        # later-line nuances that the deep analysis evaluates correctly anyway.
+        # Skip the prescreen and deep-analyze the top max_deep directly.
+        if settings.enable_deterministic_pre_filter:
+            to_analyze = [unanalyzed[nid] for nid in ordered_ids if nid in unanalyzed][:max_deep]
+            logger.info(
+                "matching.deterministic_skip_prescreen",
+                top_k=len(to_analyze),
+                first_few=[t["nct_id"] for t in to_analyze[:5]],
+            )
+        else:
+            # Legacy path: LLM prescreen
+            trials_list_lines = []
+            for nid in ordered_ids:
+                if nid not in unanalyzed:
+                    continue
+                trial = unanalyzed[nid]
+                trials_list_lines.append(
+                    f"- **{trial['nct_id']}**: {trial['brief_title']}\n"
+                    f"  Phase: {trial['phase']} | Conditions: {', '.join(trial.get('conditions', []))}\n"
+                    f"  Summary: {trial['brief_summary'][:200]}"
+                )
+
+            patient_vars = format_patient_for_prompt(patient)
+            prescreen_sys = PRESCREEN_SYSTEM_PROMPT.format(**patient_vars)
+            prescreen_user = PRESCREEN_USER_PROMPT.format(trials_list="\n".join(trials_list_lines))
+
+            rankings, high_tier_ids = await self._run_prescreen(
+                prescreen_sys, prescreen_user, list(unanalyzed.keys()), max_deep
+            )
+            for r in rankings:
+                if r.get("tier") == "LOW" and r["nct_id"] not in analyses:
+                    analyses[r["nct_id"]] = {
+                        "match_score": 0,
+                        "match_tier": "EXCLUDED",
+                        "match_explanation": f"Pre-screen: {r.get('reason', 'Not relevant')}",
+                        "inclusion_evaluations": [],
+                        "exclusion_evaluations": [],
+                        "flags_for_oncologist": [],
+                        "criteria_met": 0,
+                        "criteria_not_met": 0,
+                        "criteria_unknown": 0,
+                        "criteria_total": 0,
+                    }
+
+            MIN_DEEP_ANALYZE = 8
+            if len(high_tier_ids) < MIN_DEEP_ANALYZE:
+                for nct_id in ordered_ids:
+                    if nct_id not in high_tier_ids and nct_id in unanalyzed and nct_id not in analyses:
+                        high_tier_ids.append(nct_id)
+                    if len(high_tier_ids) >= MIN_DEEP_ANALYZE:
+                        break
+
+            if not high_tier_ids:
+                return analyses
+
+            high_set = set(high_tier_ids)
+            to_analyze = [unanalyzed[nid] for nid in ordered_ids if nid in high_set and nid in unanalyzed][:max_deep]
+
+        if not to_analyze:
+            return analyses
+
+        # --- Stage 3: Deep analysis on selected trials ---
         # Build system prompt ONCE for all trials (prompt caching)
         sys_prompt = self._build_eligibility_system_prompt(patient, biomarker_context)
 
@@ -623,12 +696,21 @@ class MatchingAgent(BaseAgent):
     async def _handle_analyze_batch(
         self, decision: AgentDecision, scratchpad: Scratchpad, budget: AgentBudget
     ) -> tuple[str, bool]:
-        """Handle analyze_batch — two-tier analysis for speed.
+        """Handle analyze_batch — deterministic pre-filter + two-tier analysis.
 
-        Tier 1: Fast pre-screen ALL unanalyzed trials in one Claude call (~5s).
-        Tier 2: Deep criterion-level analysis on only the HIGH-tier trials (~5s each).
+        1. Pre-filter biomarker mismatches deterministically.
+        2. Rank survivors with deterministic ranker (rules + BM25).
+        3. LLM prescreen on top 20 in deterministic order.
+        4. Deep criterion-level analysis on HIGH-tier (parallel).
         """
         from prompts import PRESCREEN_SYSTEM_PROMPT, PRESCREEN_USER_PROMPT
+        from tools.deterministic_rank import rank_candidates
+        from tools.trial_classifier import (
+            classify_interventions,
+            is_biomarker_aligned,
+            is_radiation_or_observational_only,
+            patient_actionable_genes,
+        )
 
         pool = scratchpad.state["trials_pool"]
         analyses = scratchpad.state["analyses"]
@@ -636,16 +718,59 @@ class MatchingAgent(BaseAgent):
         settings = scratchpad.state["settings"]
 
         # Find unanalyzed trials
-        unanalyzed = {nct_id: trial for nct_id, trial in pool.items() if nct_id not in analyses}
-        if not unanalyzed:
+        unanalyzed_raw = {nct_id: trial for nct_id, trial in pool.items() if nct_id not in analyses}
+        if not unanalyzed_raw:
             return "No unanalyzed trials in pool", False
 
-        # Stage 3 (Gemma, local): re-rank unanalyzed trials by semantic similarity
-        unanalyzed = await self._semantic_rank(unanalyzed, patient, settings)
+        # --- Stage 0: deterministic pre-filter (drop hard mismatches) ---
+        genes = patient_actionable_genes(patient.biomarkers or [])
+        survivors: list[dict] = []
+        pre_filtered = 0
+        for trial in unanalyzed_raw.values():
+            if genes and settings.enable_biomarker_alignment_cap:
+                itypes = classify_interventions(trial)
+                aligned, _ = is_biomarker_aligned(trial, genes)
+                if is_radiation_or_observational_only(itypes) and not aligned:
+                    pre_filtered += 1
+                    analyses[trial["nct_id"]] = {
+                        "match_score": 0,
+                        "match_tier": "EXCLUDED",
+                        "match_explanation": (
+                            f"Trial does not target patient's actionable biomarkers ({', '.join(sorted(genes))})."
+                        ),
+                        "inclusion_evaluations": [],
+                        "exclusion_evaluations": [],
+                        "flags_for_oncologist": [],
+                        "criteria_met": 0,
+                        "criteria_not_met": 0,
+                        "criteria_unknown": 0,
+                        "criteria_total": 0,
+                    }
+                    continue
+            survivors.append(trial)
 
-        # --- Tier 1: Fast pre-screen in a single call ---
+        if pre_filtered:
+            logger.info("match.batch_pre_filtered", count=pre_filtered, genes=sorted(genes))
+
+        if not survivors:
+            return f"Pre-filtered all {pre_filtered} trials (biomarker mismatch)", True
+
+        # --- Stage 1: deterministic ranking ---
+        if settings.enable_deterministic_pre_filter:
+            ranked = rank_candidates(patient, survivors, genes)
+            ordered_ids = [t["nct_id"] for t, _, _ in ranked]
+        else:
+            ordered_ids = [t["nct_id"] for t in survivors]
+
+        MAX_PRESCREEN = settings.deterministic_prefilter_top_k
+        unanalyzed = {nid: pool[nid] for nid in ordered_ids[:MAX_PRESCREEN] if nid in pool}
+
+        # --- Stage 2: LLM prescreen in deterministic order ---
         trials_list_lines = []
-        for trial in unanalyzed.values():
+        for nid in ordered_ids:
+            if nid not in unanalyzed:
+                continue
+            trial = unanalyzed[nid]
             trials_list_lines.append(
                 f"- **{trial['nct_id']}**: {trial['brief_title']}\n"
                 f"  Phase: {trial['phase']} | Conditions: {', '.join(trial.get('conditions', []))}\n"
@@ -675,9 +800,11 @@ class MatchingAgent(BaseAgent):
         if not high_tier_ids:
             return f"Pre-screened {len(unanalyzed)} trials, none passed to deep analysis", True
 
-        # --- Tier 2: Deep criterion-level analysis on HIGH-tier only ---
+        # --- Stage 3: Deep criterion-level analysis on HIGH-tier only ---
         max_deep = min(len(high_tier_ids), budget.analyses_remaining, 10)
-        to_analyze = [unanalyzed[nid] for nid in high_tier_ids[:max_deep] if nid in unanalyzed]
+        # Stable order: iterate ordered_ids, keep only HIGH set
+        high_set = set(high_tier_ids)
+        to_analyze = [unanalyzed[nid] for nid in ordered_ids if nid in high_set and nid in unanalyzed][:max_deep]
 
         biomarker_context = scratchpad.state.get("biomarker_context", "")
 
@@ -982,7 +1109,27 @@ class MatchingAgent(BaseAgent):
                         ev["category"] = parsed_by_id[cid].get("category", "other")
 
                 flags = result.get("flags_for_oncologist", [])
-                score_result = calculate_match_score(evals, flags)
+                # Pass biomarker context to scoring for the −30 penalty + hard cap
+                from tools.trial_classifier import (
+                    classify_interventions as _classify,
+                )
+                from tools.trial_classifier import (
+                    is_biomarker_aligned as _is_aligned,
+                )
+                from tools.trial_classifier import (
+                    patient_actionable_genes as _genes,
+                )
+
+                _patient_genes = _genes(patient.biomarkers or [])
+                _itypes = _classify(trial)
+                _aligned, _ = _is_aligned(trial, _patient_genes)
+                score_result = calculate_match_score(
+                    evals,
+                    flags,
+                    biomarker_aligned=_aligned,
+                    intervention_types=_itypes,
+                    has_actionable_genes=bool(_patient_genes),
+                )
                 logger.info("analysis.scored", nct_id=nct_id, score=score_result["score"], tier=score_result["tier"])
 
                 # Build the analysis dict in the shape downstream expects
@@ -1051,7 +1198,8 @@ class MatchingAgent(BaseAgent):
                 if match is not None:
                     matches.append(match)
 
-        matches.sort(key=lambda m: m.match_score, reverse=True)
+        # Stable tiebreaker: highest score first, then nct_id ascending
+        matches.sort(key=lambda m: (-m.match_score, m.nct_id))
         return matches[:max_results]
 
     async def _enrich_biomarkers(self, patient: PatientProfile) -> str:

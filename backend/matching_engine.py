@@ -92,10 +92,25 @@ async def _analyze_trial(
             result = _parse_json_response(text)
 
             if result is not None and result.get("criterion_evaluations"):
-                # Step 3: Score programmatically
+                # Step 3: Score programmatically with biomarker-aware penalties
                 evals = result["criterion_evaluations"]
                 flags = result.get("flags_for_oncologist", [])
-                score = calculate_match_score(evals, flags)
+                from tools.trial_classifier import (
+                    classify_interventions,
+                    is_biomarker_aligned,
+                    patient_actionable_genes,
+                )
+
+                _genes = patient_actionable_genes(patient.biomarkers or [])
+                _itypes = classify_interventions(trial)
+                _aligned, _ = is_biomarker_aligned(trial, _genes)
+                score = calculate_match_score(
+                    evals,
+                    flags,
+                    biomarker_aligned=_aligned,
+                    intervention_types=_itypes,
+                    has_actionable_genes=bool(_genes),
+                )
                 logger.info("trial.analyze_complete", nct_id=nct_id, score=score["score"], tier=score["tier"])
                 return {
                     "match_score": score["score"],
@@ -178,6 +193,31 @@ async def match_trials(patient: PatientProfile, max_results: int = 10) -> dict:
     total = len(trials)
     logger.info("match.search_complete", candidate_trials=total)
 
+    # --- Deterministic pre-filter: drop biomarker mismatches and rank survivors ---
+    from tools.deterministic_rank import rank_candidates
+    from tools.trial_classifier import (
+        classify_interventions,
+        is_biomarker_aligned,
+        is_radiation_or_observational_only,
+        patient_actionable_genes,
+    )
+
+    genes = patient_actionable_genes(patient.biomarkers or [])
+    if genes and settings.enable_biomarker_alignment_cap:
+        survivors = []
+        for t in trials:
+            itypes = classify_interventions(t)
+            aligned, _ = is_biomarker_aligned(t, genes)
+            if is_radiation_or_observational_only(itypes) and not aligned:
+                logger.info("match.pre_filtered_biomarker_mismatch", nct_id=t.get("nct_id"))
+                continue
+            survivors.append(t)
+        trials = survivors
+
+    if settings.enable_deterministic_pre_filter and trials:
+        ranked = rank_candidates(patient, trials, genes)
+        trials = [t for t, _, _ in ranked]
+
     # Concurrency is managed by AdaptiveConcurrencyLimiter in paced_claude_call
 
     async def analyze_with_limit(trial: dict, index: int):
@@ -204,7 +244,8 @@ async def match_trials(patient: PatientProfile, max_results: int = 10) -> dict:
             if match is not None:
                 matches.append(match)
 
-    matches.sort(key=lambda m: m.match_score, reverse=True)
+    # Stable tiebreaker: highest score first, then nct_id ascending
+    matches.sort(key=lambda m: (-m.match_score, m.nct_id))
     matches = matches[:max_results]
 
     patient_summary = await summary_task

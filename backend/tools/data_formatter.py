@@ -18,11 +18,47 @@ logger = get_logger("kyriaki.tools.data_formatter")
 
 
 def build_scored_match(trial: dict, analysis: dict, patient: PatientProfile) -> TrialMatch | None:
-    """Build a TrialMatch from trial data + Claude analysis, with distance filtering."""
+    """Build a TrialMatch from trial data + Claude analysis, with distance filtering.
+
+    Layer 3 of the biomarker-therapy alignment defense: even if the pre-filter
+    and scoring penalty both miss, this caps any radiation-only/observational
+    trial that doesn't address the patient's actionable biomarkers at score 40.
+    """
     nearest_site, distance = find_nearest_site(trial.get("locations", []), patient.location_zip)
 
     if distance is not None and distance > patient.willing_to_travel_miles:
         return None
+
+    # --- Layer 3: post-hoc biomarker mismatch cap ---
+    from tools.trial_classifier import (
+        classify_interventions,
+        is_biomarker_aligned,
+        is_radiation_or_observational_only,
+        patient_actionable_genes,
+    )
+
+    genes = patient_actionable_genes(patient.biomarkers or [])
+    score = analysis.get("match_score", 0)
+    if genes:
+        itypes = classify_interventions(trial)
+        aligned, _ = is_biomarker_aligned(trial, genes)
+        if is_radiation_or_observational_only(itypes) and not aligned and score > 40:
+            logger.info(
+                "match.score_capped_biomarker_mismatch",
+                nct_id=trial.get("nct_id"),
+                original_score=score,
+                genes=sorted(genes),
+            )
+            score = 40
+            analysis = dict(analysis)
+            analysis["match_score"] = score
+            analysis["match_tier"] = "PARTIAL_MATCH" if score >= 25 else "UNLIKELY_MATCH"
+            flags = list(analysis.get("flags_for_oncologist") or [])
+            flags.append(
+                f"Score capped at 40: trial does not target patient's actionable "
+                f"biomarkers ({', '.join(sorted(genes))})."
+            )
+            analysis["flags_for_oncologist"] = flags
 
     def _safe_criterion(e: dict) -> dict:
         """Ensure criterion eval dict has all required fields."""

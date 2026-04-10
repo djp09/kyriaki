@@ -219,6 +219,12 @@ For each trial, assign a relevance tier:
 - **HIGH** — Cancer type matches, no obvious disqualifiers. Worth detailed analysis.
 - **LOW** — Wrong cancer type, wrong stage, clearly ineligible, observational/biobank study, or not a treatment trial.
 
+## Biomarker–Therapy Alignment Rules (CRITICAL)
+- If the patient has actionable biomarkers (e.g., EGFR+, ALK+, BRAF V600E, KRAS G12C, HER2+, BRCA1/2+), HIGH-priority trials are those testing **targeted therapies for those genes** (e.g., osimertinib for EGFR, alectinib for ALK).
+- **Radiation-only or biospecimen/observational trials are LOW** when the patient has actionable molecular targets — they don't address the patient's strategic treatment need.
+- **Combination trials** (targeted + radiation, IO + chemo) are **HIGH** if any component targets the patient's biomarkers.
+- For patients without actionable biomarkers, treat all therapeutic modalities equally.
+
 Be aggressive with LOW — we only want to deeply analyze the most promising matches.
 
 Respond with ONLY a JSON object:
