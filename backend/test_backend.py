@@ -344,15 +344,25 @@ class TestFindNearestSite:
 
 class TestEndpoints:
     @pytest.fixture
-    def client(self):
+    def client(self, monkeypatch):
         from fastapi.testclient import TestClient
 
+        import main
         from main import app
 
-        # Use context manager so the lifespan runs and DB tables are created.
-        # The intake endpoint writes to DB, so this is required for test_intake_*.
-        with TestClient(app) as c:
-            yield c
+        # Stub out save_patient_profile so the intake endpoint doesn't hit
+        # the real database. CI uses Postgres + asyncpg, and the combination
+        # of TestClient + BaseHTTPMiddleware + asyncpg fails with "operation
+        # in progress" errors due to event loop scoping. Bypassing the DB
+        # call lets these contract tests focus on the HTTP layer.
+        async def _fake_save(_session, _profile_data, **_kwargs):
+            class _FakePatient:
+                id = "00000000-0000-0000-0000-000000000000"
+
+            return _FakePatient()
+
+        monkeypatch.setattr(main, "save_patient_profile", _fake_save)
+        return TestClient(app)
 
     def test_health(self, client):
         resp = client.get("/api/health")
