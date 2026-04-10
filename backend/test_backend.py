@@ -349,7 +349,10 @@ class TestEndpoints:
 
         from main import app
 
-        return TestClient(app)
+        # Use context manager so the lifespan runs and DB tables are created.
+        # The intake endpoint writes to DB, so this is required for test_intake_*.
+        with TestClient(app) as c:
+            yield c
 
     def test_health(self, client):
         resp = client.get("/api/health")

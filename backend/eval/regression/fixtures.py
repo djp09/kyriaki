@@ -217,8 +217,8 @@ REGRESSION_FIXTURES: list[dict] = [
             },
         ],
         "flags_for_oncologist": ["Confirm adequate organ function labs"],
-        # 4 MET + 1 unknown → base=(4*1.0 + 1*0.3)/5*100 = 86, conf_bonus=4/5*10=8 → 94
-        "expected_score": 94.0,
+        # 4 MET + 1 unknown → base=(4*1.0 + 1*0.15)/5*100 = 83, conf_bonus=4/5*10=8 → 91
+        "expected_score": 91.0,
         "expected_tier": "STRONG_MATCH",
         "expected_criteria_met": 4,
         "expected_criteria_not_met": 0,
@@ -588,10 +588,10 @@ REGRESSION_FIXTURES: list[dict] = [
         ],
         "flags_for_oncologist": ["Confirm bilirubin level", "Verify platelet count units"],
         # 2 MET (HIGH) + 1 NOT_MET + 2 unknown
-        # base = (2*1.0 + 2*0.3)/5*100 = 52, conf_bonus = 2/5*10 = 4
-        # not_met_penalty = 1*8 = 8
-        # final = 52 + 4 - 8 = 48
-        "expected_score": 48.0,
+        # base = (2*1.0 + 2*0.15)/5*100 = 46, conf_bonus = 2/5*10 = 4
+        # not_met_penalty = 1*10 = 10
+        # final = 46 + 4 - 10 = 40
+        "expected_score": 40.0,
         "expected_tier": "PARTIAL_MATCH",
         "expected_criteria_met": 2,
         "expected_criteria_not_met": 1,
@@ -676,9 +676,9 @@ REGRESSION_FIXTURES: list[dict] = [
         "flags_for_oncologist": ["Confirm seizure status is controlled"],
         # 3 MET + 1 NOT_MET + 0 unknown inclusion
         # base = (3*1.0)/4*100 = 75, conf_bonus = 3/4*10 = 7.5
-        # not_met_penalty = 1*8 = 8, exclusion_penalty = 1*3 = 3
-        # final = 75 + 7.5 - 8 - 3 = 71.5
-        "expected_score": 71.5,
+        # not_met_penalty = 1*10 = 10, exclusion_penalty = 1*3 = 3
+        # final = 75 + 7.5 - 10 - 3 = 69.5
+        "expected_score": 69.5,
         "expected_tier": "POTENTIAL_MATCH",
         "expected_criteria_met": 3,
         "expected_criteria_not_met": 1,
@@ -903,11 +903,11 @@ REGRESSION_FIXTURES: list[dict] = [
             },
         ],
         "flags_for_oncologist": ["Confirm renal/hepatic function", "Rule out autoimmune disease"],
-        # 3 MET + 3 unknown → base = (3*1.0 + 3*0.3)/6*100 = 65
+        # 3 MET + 3 unknown → base = (3*1.0 + 3*0.15)/6*100 = 57.5
         # conf_bonus = 3/6*10 = 5, not_met_penalty = 0
         # exclusion_penalty = 1*3 = 3
-        # final = 65 + 5 - 0 - 3 = 67
-        "expected_score": 67.0,
+        # final = 57.5 + 5 - 0 - 3 = 59.5
+        "expected_score": 59.5,
         "expected_tier": "POTENTIAL_MATCH",
         "expected_criteria_met": 3,
         "expected_criteria_not_met": 0,
@@ -990,10 +990,10 @@ REGRESSION_FIXTURES: list[dict] = [
             },
         ],
         "flags_for_oncologist": ["Confirm LVEF >= 50%"],
-        # 3 MET + 1 unknown → base = (3*1.0 + 1*0.3)/4*100 = 82.5
+        # 3 MET + 1 unknown → base = (3*1.0 + 1*0.15)/4*100 = 78.75
         # conf_bonus = 3/4*10 = 7.5, not_met_penalty = 0, excl_penalty = 0
-        # final = 82.5 + 7.5 = 90, capped 90. not_met==0 and >=75 → STRONG_MATCH
-        "expected_score": 90.0,
+        # final = 78.75 + 7.5 = 86.25 → 86.2 (rounded). not_met==0 and >=75 → STRONG_MATCH
+        "expected_score": 86.2,
         "expected_tier": "STRONG_MATCH",
         "expected_criteria_met": 3,
         "expected_criteria_not_met": 0,
@@ -1124,12 +1124,12 @@ REGRESSION_FIXTURES: list[dict] = [
             },
         ],
         "flags_for_oncologist": ["Multiple lab values needed", "Confirm washout period"],
-        # 1 MET + 5 unknown → base = (1*1.0 + 5*0.3)/6*100 = 41.67
+        # 1 MET + 5 unknown → base = (1*1.0 + 5*0.15)/6*100 = 29.17
         # conf_bonus = 1/6*10 = 1.67
         # exclusion_penalty = 2*3 = 6
-        # final = 41.67 + 1.67 - 6 = 37.34, round to 37.3
-        "expected_score": 37.3,
-        "expected_tier": "PARTIAL_MATCH",
+        # final = 29.17 + 1.67 - 6 = 24.84, round to 24.8 → UNLIKELY_MATCH (<25)
+        "expected_score": 24.8,
+        "expected_tier": "UNLIKELY_MATCH",
         "expected_criteria_met": 1,
         "expected_criteria_not_met": 0,
         "expected_criteria_unknown": 5,
@@ -1260,10 +1260,9 @@ REGRESSION_FIXTURES: list[dict] = [
         "flags_for_oncologist": [],
         # diagnosis has both MET and NOT_MET → NOT hard-excluded (multi-cohort rule)
         # 3 MET + 1 NOT_MET → base = 3/4*100 = 75, conf_bonus = 3/4*10 = 7.5
-        # not_met_penalty = 1*8 = 8
-        # final = 75 + 7.5 - 8 = 74.5
-        # 74.5 < 75 OR not_met > 0 → POTENTIAL_MATCH
-        "expected_score": 74.5,
+        # not_met_penalty = 1*10 = 10
+        # final = 75 + 7.5 - 10 = 72.5 → POTENTIAL_MATCH (<75 or not_met > 0)
+        "expected_score": 72.5,
         "expected_tier": "POTENTIAL_MATCH",
         "expected_criteria_met": 3,
         "expected_criteria_not_met": 1,
