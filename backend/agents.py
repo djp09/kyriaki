@@ -531,39 +531,29 @@ class MatchingAgent(BaseAgent):
         prescreen_sys = PRESCREEN_SYSTEM_PROMPT.format(**patient_vars)
         prescreen_user = PRESCREEN_USER_PROMPT.format(trials_list="\n".join(trials_list_lines))
 
-        prescreen_result = await claude_json_call(prescreen_user, max_tokens=1200, system=prescreen_sys)
-        if not prescreen_result.success:
-            high_tier_ids = list(unanalyzed.keys())[:max_deep]
-        else:
-            rankings = prescreen_result.data.get("rankings", [])
-            high_tier_ids = [r["nct_id"] for r in rankings if r.get("tier") == "HIGH"]
-            logger.info(
-                "matching.prescreen",
-                total=len(rankings),
-                high=len(high_tier_ids),
-                low=len(rankings) - len(high_tier_ids),
-            )
-
-            for r in rankings:
-                if r.get("tier") == "LOW" and r["nct_id"] not in analyses:
-                    analyses[r["nct_id"]] = {
-                        "match_score": 0,
-                        "match_tier": "EXCLUDED",
-                        "match_explanation": f"Pre-screen: {r.get('reason', 'Not relevant')}",
-                        "inclusion_evaluations": [],
-                        "exclusion_evaluations": [],
-                        "flags_for_oncologist": [],
-                        "criteria_met": 0,
-                        "criteria_not_met": 0,
-                        "criteria_unknown": 0,
-                        "criteria_total": 0,
-                    }
+        rankings, high_tier_ids = await self._run_prescreen(
+            prescreen_sys, prescreen_user, list(unanalyzed.keys()), max_deep
+        )
+        for r in rankings:
+            if r.get("tier") == "LOW" and r["nct_id"] not in analyses:
+                analyses[r["nct_id"]] = {
+                    "match_score": 0,
+                    "match_tier": "EXCLUDED",
+                    "match_explanation": f"Pre-screen: {r.get('reason', 'Not relevant')}",
+                    "inclusion_evaluations": [],
+                    "exclusion_evaluations": [],
+                    "flags_for_oncologist": [],
+                    "criteria_met": 0,
+                    "criteria_not_met": 0,
+                    "criteria_unknown": 0,
+                    "criteria_total": 0,
+                }
 
         # If pre-screen found very few HIGH candidates, force-analyze the top
         # few anyway. The fast pre-screen can be overly aggressive for early-stage
         # or uncommon cancer types, and a deeper criterion-level analysis may
         # find partial matches the pre-screen missed.
-        MIN_DEEP_ANALYZE = 3
+        MIN_DEEP_ANALYZE = 8
         if len(high_tier_ids) < MIN_DEEP_ANALYZE:
             # Add unanalyzed trials not already in high_tier_ids, preserving pool order
             for nct_id in unanalyzed:
@@ -666,36 +656,21 @@ class MatchingAgent(BaseAgent):
         prescreen_sys = PRESCREEN_SYSTEM_PROMPT.format(**patient_vars)
         prescreen_user = PRESCREEN_USER_PROMPT.format(trials_list="\n".join(trials_list_lines))
 
-        prescreen_result = await claude_json_call(prescreen_user, max_tokens=800, system=prescreen_sys)
-        if not prescreen_result.success:
-            # Fallback: analyze first 5 without pre-screening
-            high_tier_ids = list(unanalyzed.keys())[:5]
-        else:
-            rankings = prescreen_result.data.get("rankings", [])
-            high_tier_ids = [r["nct_id"] for r in rankings if r.get("tier") == "HIGH"]
-            low_count = len(rankings) - len(high_tier_ids)
-            logger.info(
-                "matching.prescreen",
-                total=len(rankings),
-                high=len(high_tier_ids),
-                low=low_count,
-            )
-
-            # Mark LOW-tier trials as analyzed with score 0 so we don't re-analyze
-            for r in rankings:
-                if r.get("tier") == "LOW" and r["nct_id"] not in analyses:
-                    analyses[r["nct_id"]] = {
-                        "match_score": 0,
-                        "match_tier": "EXCLUDED",
-                        "match_explanation": f"Pre-screen: {r.get('reason', 'Not relevant')}",
-                        "inclusion_evaluations": [],
-                        "exclusion_evaluations": [],
-                        "flags_for_oncologist": [],
-                        "criteria_met": 0,
-                        "criteria_not_met": 0,
-                        "criteria_unknown": 0,
-                        "criteria_total": 0,
-                    }
+        rankings, high_tier_ids = await self._run_prescreen(prescreen_sys, prescreen_user, list(unanalyzed.keys()), 10)
+        for r in rankings:
+            if r.get("tier") == "LOW" and r["nct_id"] not in analyses:
+                analyses[r["nct_id"]] = {
+                    "match_score": 0,
+                    "match_tier": "EXCLUDED",
+                    "match_explanation": f"Pre-screen: {r.get('reason', 'Not relevant')}",
+                    "inclusion_evaluations": [],
+                    "exclusion_evaluations": [],
+                    "flags_for_oncologist": [],
+                    "criteria_met": 0,
+                    "criteria_not_met": 0,
+                    "criteria_unknown": 0,
+                    "criteria_total": 0,
+                }
 
         if not high_tier_ids:
             return f"Pre-screened {len(unanalyzed)} trials, none passed to deep analysis", True
@@ -789,6 +764,82 @@ class MatchingAgent(BaseAgent):
         adjusted_count = sum(1 for r in results if r)
 
         return f"Evaluated {len(borderline)} borderline scores, adjusted {adjusted_count}", True
+
+    async def _run_prescreen(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        all_nct_ids: list[str],
+        max_deep: int,
+    ) -> tuple[list[dict], list[str]]:
+        """Run prescreen using tool_use for deterministic structured output.
+
+        Returns (rankings, high_tier_ids). Uses Anthropic tool_use instead of
+        free-form JSON — Claude must call the tool with the exact schema,
+        producing more consistent outputs across runs.
+        """
+        prescreen_tool = {
+            "name": "submit_rankings",
+            "description": "Submit the trial relevance rankings.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "rankings": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "nct_id": {"type": "string"},
+                                "tier": {"type": "string", "enum": ["HIGH", "LOW"]},
+                                "reason": {"type": "string", "description": "5 words max"},
+                            },
+                            "required": ["nct_id", "tier", "reason"],
+                        },
+                    }
+                },
+                "required": ["rankings"],
+            },
+        }
+
+        try:
+            response = await paced_claude_call(
+                get_claude_client(),
+                model=get_settings().claude_model,
+                max_tokens=1200,
+                messages=[{"role": "user", "content": user_prompt}],
+                system=system_prompt,
+                tools=[prescreen_tool],
+                temperature=0.0,
+            )
+
+            # Extract tool_use result
+            rankings = []
+            for block in response.content:
+                if block.type == "tool_use" and block.name == "submit_rankings":
+                    rankings = block.input.get("rankings", [])
+                    break
+
+            if not rankings:
+                # Fallback: try parsing text response as JSON
+                for block in response.content:
+                    if block.type == "text":
+                        parsed = parse_json_response(block.text)
+                        if parsed:
+                            rankings = parsed.get("rankings", [])
+                            break
+
+            high_tier_ids = [r["nct_id"] for r in rankings if r.get("tier") == "HIGH"]
+            logger.info(
+                "matching.prescreen",
+                total=len(rankings),
+                high=len(high_tier_ids),
+                low=len(rankings) - len(high_tier_ids),
+            )
+            return rankings, high_tier_ids
+
+        except Exception as e:
+            logger.warning("matching.prescreen_failed", error=str(e))
+            return [], list(all_nct_ids)[:max_deep]
 
     def _build_eligibility_system_prompt(self, patient: PatientProfile, biomarker_context: str = "") -> str:
         """Build the cacheable system prompt for eligibility analysis.
@@ -893,7 +944,7 @@ class MatchingAgent(BaseAgent):
             user_msg = prompt_result.data
 
         # Adaptive max_tokens: scale with criteria count to avoid truncation
-        analysis_max_tokens = min(2500, max(1200, len(criteria_lines) * 120))
+        analysis_max_tokens = min(4000, max(1500, len(criteria_lines) * 150))
 
         for attempt in range(settings.max_retries + 1):
             try:
@@ -903,6 +954,7 @@ class MatchingAgent(BaseAgent):
                     max_tokens=analysis_max_tokens,
                     messages=[{"role": "user", "content": user_msg}],
                     system=system_prompt,
+                    temperature=0.0,
                 )
                 text = response.content[0].text.strip()
                 result = parse_json_response(text)

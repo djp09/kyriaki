@@ -28,11 +28,11 @@ class CriterionEvaluation(BaseModel):
     explanation: str = ""
     patient_data_used: list[str] = Field(default_factory=list)
 
-    @field_validator("status", "confidence", mode="before")
+    @field_validator("status", "confidence", "explanation", mode="before")
     @classmethod
     def coerce_to_str(cls, v: object, info) -> str:
         if v is None or v == "":
-            defaults = {"status": "INSUFFICIENT_INFO", "confidence": "MEDIUM"}
+            defaults = {"status": "INSUFFICIENT_INFO", "confidence": "MEDIUM", "explanation": ""}
             return defaults.get(info.field_name, "")
         return str(v)
 

@@ -44,6 +44,7 @@ async def call_claude_with_retry(
     tools: list | None = None,
     allow_binary: bool = False,
     system: str | list[dict] | None = None,
+    temperature: float | None = None,
 ) -> anthropic.types.Message:
     """Call Claude with exponential backoff on rate limits.
 
@@ -79,6 +80,8 @@ async def call_claude_with_retry(
                 "max_tokens": payload.max_tokens,
                 "messages": payload.messages,
             }
+            if temperature is not None:
+                create_kwargs["temperature"] = temperature
             if payload.tools:
                 create_kwargs["tools"] = payload.tools
             if system_blocks:
@@ -193,6 +196,7 @@ async def paced_claude_call(
     tools: list | None = None,
     allow_binary: bool = False,
     system: str | list[dict] | None = None,
+    temperature: float | None = None,
 ) -> anthropic.types.Message:
     """Call Claude with adaptive concurrency limiting.
 
@@ -210,6 +214,7 @@ async def paced_claude_call(
             tools=tools,
             allow_binary=allow_binary,
             system=system,
+            temperature=temperature,
         )
         await limiter.on_success()
         return result
@@ -351,8 +356,12 @@ async def claude_json_call(
     model: str | None = None,
     max_tokens: int = 1500,
     system: str | list[dict] | None = None,
+    temperature: float = 0.0,
 ) -> ToolResult:
-    """Call Claude and parse the response as JSON. Returns ToolResult with token_usage."""
+    """Call Claude and parse the response as JSON. Returns ToolResult with token_usage.
+
+    Defaults to temperature=0 for deterministic structured outputs (Anthropic best practice).
+    """
     settings = get_settings()
     model = model or settings.claude_model
     try:
@@ -362,6 +371,7 @@ async def claude_json_call(
             max_tokens=max_tokens,
             messages=[{"role": "user", "content": prompt}],
             system=system,
+            temperature=temperature,
         )
         tokens = _extract_token_usage(response)
         result = parse_json_response(response.content[0].text)

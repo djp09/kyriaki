@@ -414,6 +414,7 @@ async def _get_next_action_tool_use(
             max_tokens=500,
             messages=[{"role": "user", "content": prompt}],
             tools=tools,
+            temperature=0.0,
         )
     except Exception as e:
         logger.warning("agent.tool_use_failed", error=str(e))
