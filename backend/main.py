@@ -825,3 +825,34 @@ async def trigger_trial_refresh(db: AsyncSession = Depends(get_db)):
 async def trial_cache_stats(db: AsyncSession = Depends(get_db)):
     """Get trial cache statistics."""
     return await get_cache_stats(db)
+
+
+# --- Observability endpoints (P0-3) ---
+
+
+@app.get("/api/metrics/summary")
+async def metrics_summary(window_seconds: int = Query(default=86400, ge=60, le=2592000)):
+    """Rolled-up cost / latency / cache-hit metrics over a recent window."""
+    import metrics as metrics_mod
+
+    return metrics_mod.summary_rollup(window_seconds=window_seconds)
+
+
+@app.get("/api/metrics/recent")
+async def metrics_recent(limit: int = Query(default=25, ge=1, le=200)):
+    """List the most recent completed runs (newest last)."""
+    import metrics as metrics_mod
+
+    runs = metrics_mod.get_recent_runs(limit=limit)
+    return [r.to_summary() for r in runs]
+
+
+@app.get("/api/metrics/runs/{run_id}")
+async def metrics_run_detail(run_id: str):
+    """Per-call detail for a single run, including cost and wall-clock per call."""
+    import metrics as metrics_mod
+
+    run = metrics_mod.get_run(run_id)
+    if run is None:
+        raise HTTPException(404, f"Run {run_id} not found or aged out of history")
+    return run.to_detail()

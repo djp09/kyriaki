@@ -5,11 +5,13 @@ Runs each synthetic patient through the matching pipeline and measures:
 2. Criterion-level accuracy (do MET/NOT_MET/INSUFFICIENT_INFO make sense?)
 3. Tier distribution (do we get a mix of tiers?)
 4. Category accuracy (are diagnosis/biomarker/demographic criteria correct?)
+5. Per-patient cost, wall-clock, cache hit ratio (via metrics layer).
 
 Usage:
     python3 -m eval.run_eval                    # all patients
     python3 -m eval.run_eval eval_nsclc_egfr    # single patient
     python3 -m eval.run_eval --quick            # first 3 patients only
+    python3 -m eval.run_eval --quick --snapshot # also write to eval/baselines/
 """
 
 from __future__ import annotations
@@ -20,11 +22,13 @@ import statistics
 import sys
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 from dotenv import load_dotenv
 
 load_dotenv()
 
+import metrics as metrics_mod
 from eval.synthetic_patients import SYNTHETIC_PATIENTS
 from models import PatientProfile
 from tools.criteria_parser import parse_eligibility_criteria
@@ -37,9 +41,8 @@ async def evaluate_patient(patient_data: dict, settings=None) -> dict:
 
     Returns evaluation metrics for this patient.
     """
+    from prompts import ELIGIBILITY_USER_PROMPT
     from tools.claude_api import get_claude_client, paced_claude_call, parse_json_response
-    from tools.data_formatter import format_patient_for_prompt
-    from tools.prompt_renderer import render_prompt
 
     if settings is None:
         from config import get_settings
@@ -48,6 +51,10 @@ async def evaluate_patient(patient_data: dict, settings=None) -> dict:
 
     profile = PatientProfile(**patient_data["profile"])
     label = patient_data["label"]
+
+    # Bracket this patient in its own metrics run so cost/cache/latency
+    # land in the /api/metrics/recent stream with a tagged agent name.
+    metrics_run = metrics_mod.start_run(agent=f"eval_{patient_data['id']}")
     print(f"\n{'=' * 60}")
     print(f"Patient: {label}")
     print(f"  Cancer: {profile.cancer_type}, {profile.cancer_stage}")
@@ -79,11 +86,15 @@ async def evaluate_patient(patient_data: dict, settings=None) -> dict:
     print(f"  Found {len(trials)} trials in {search_time:.1f}s")
 
     if not trials:
+        metrics_mod.end_run()
         return {"patient_id": patient_data["id"], "label": label, "error": "No trials found", "trials_found": 0}
 
-    # Step 2-4: Parse + Evaluate + Score each trial
+    # Step 2-4: Parse + Evaluate + Score each trial using the same
+    # two-tier cached system prompt as production (matching_engine).
+    from matching_engine import _build_eligibility_system_blocks
+
+    system_blocks = _build_eligibility_system_blocks(profile)
     results = []
-    patient_vars = format_patient_for_prompt(profile)
 
     for trial in trials[:10]:  # Eval top 10
         nct_id = trial["nct_id"]
@@ -104,27 +115,22 @@ async def evaluate_patient(patient_data: dict, settings=None) -> dict:
         for c in parsed["exclusion_criteria"]:
             criteria_lines.append(f"[{c['id']}] EXCLUSION ({c['category']}): {c['text']}")
 
-        # Evaluate with Claude
-        prompt_result = render_prompt(
-            prompt_name="eligibility_analysis",
-            **patient_vars,
+        user_msg = ELIGIBILITY_USER_PROMPT.format(
             nct_id=nct_id,
             brief_title=trial["brief_title"],
             phase=trial["phase"],
             brief_summary=trial["brief_summary"],
             parsed_criteria="\n".join(criteria_lines),
-            enriched_context="",
         )
-        if not prompt_result.success:
-            results.append({"nct_id": nct_id, "error": "prompt_failed", "score": None})
-            continue
 
         try:
             response = await paced_claude_call(
                 get_claude_client(),
                 model=settings.claude_model,
                 max_tokens=2500,
-                messages=[{"role": "user", "content": prompt_result.data}],
+                messages=[{"role": "user", "content": user_msg}],
+                system=system_blocks,
+                temperature=0.0,
             )
             text = response.content[0].text.strip()
             eval_result = parse_json_response(text)
@@ -172,10 +178,11 @@ async def evaluate_patient(patient_data: dict, settings=None) -> dict:
             f"| {trial['brief_title'][:50]}"
         )
 
-    return _compute_patient_metrics(patient_data, results)
+    metrics_mod.end_run()
+    return _compute_patient_metrics(patient_data, results, metrics_run)
 
 
-def _compute_patient_metrics(patient_data: dict, results: list[dict]) -> dict:
+def _compute_patient_metrics(patient_data: dict, results: list[dict], run=None) -> dict:
     """Compute metrics for a single patient's evaluation run."""
     scores = [r["score"] for r in results if r.get("score") is not None]
     tiers = [r["tier"] for r in results if r.get("tier")]
@@ -188,6 +195,14 @@ def _compute_patient_metrics(patient_data: dict, results: list[dict]) -> dict:
         "eval_errors": len(errors),
         "scores": scores,
     }
+
+    if run is not None:
+        metrics["cost_usd"] = round(run.total_cost_usd, 4)
+        metrics["wall_ms"] = round(run.wall_ms, 1)
+        metrics["claude_calls"] = len(run.calls)
+        metrics["total_input_tokens"] = run.total_input_tokens
+        metrics["total_output_tokens"] = run.total_output_tokens
+        metrics["cache_hit_ratio"] = round(run.cache_hit_ratio, 3)
 
     if scores:
         metrics["score_min"] = min(scores)
@@ -311,12 +326,44 @@ def print_summary(all_metrics: list[dict]):
             print(f"  *** POOR differentiation (avg spread = {avg_spread:.1f}, need >= 30) ***")
 
 
+def _aggregate_totals(all_metrics: list[dict]) -> dict:
+    """Roll up per-patient metrics into a single baseline snapshot."""
+    cost_total = sum(m.get("cost_usd", 0.0) or 0.0 for m in all_metrics)
+    wall_total_ms = sum(m.get("wall_ms", 0.0) or 0.0 for m in all_metrics)
+    claude_calls = sum(m.get("claude_calls", 0) or 0 for m in all_metrics)
+    input_tokens = sum(m.get("total_input_tokens", 0) or 0 for m in all_metrics)
+    output_tokens = sum(m.get("total_output_tokens", 0) or 0 for m in all_metrics)
+    cache_hit_ratios = [m["cache_hit_ratio"] for m in all_metrics if "cache_hit_ratio" in m]
+    all_scores = []
+    for m in all_metrics:
+        all_scores.extend(m.get("scores") or [])
+    return {
+        "patient_count": len(all_metrics),
+        "total_cost_usd": round(cost_total, 4),
+        "avg_cost_per_patient_usd": round(cost_total / len(all_metrics), 4) if all_metrics else 0.0,
+        "total_wall_ms": round(wall_total_ms, 1),
+        "avg_wall_ms_per_patient": round(wall_total_ms / len(all_metrics), 1) if all_metrics else 0.0,
+        "total_claude_calls": claude_calls,
+        "total_input_tokens": input_tokens,
+        "total_output_tokens": output_tokens,
+        "avg_cache_hit_ratio": round(sum(cache_hit_ratios) / len(cache_hit_ratios), 3) if cache_hit_ratios else 0.0,
+        "score_count": len(all_scores),
+        "score_mean": round(statistics.mean(all_scores), 1) if all_scores else 0.0,
+        "score_stdev": round(statistics.stdev(all_scores), 1) if len(all_scores) > 1 else 0.0,
+        "score_median": round(statistics.median(all_scores), 1) if all_scores else 0.0,
+        "score_min": round(min(all_scores), 1) if all_scores else 0.0,
+        "score_max": round(max(all_scores), 1) if all_scores else 0.0,
+    }
+
+
 async def main():
     patients = SYNTHETIC_PATIENTS
+    snapshot_mode = "--snapshot" in sys.argv
+    positional = [a for a in sys.argv[1:] if not a.startswith("--")]
 
     # Filter by patient ID if specified
-    if len(sys.argv) > 1 and sys.argv[1] != "--quick":
-        patient_id = sys.argv[1]
+    if positional:
+        patient_id = positional[0]
         patients = [p for p in patients if p["id"] == patient_id]
         if not patients:
             print(f"Patient '{patient_id}' not found. Available:")
@@ -327,15 +374,15 @@ async def main():
     if "--quick" in sys.argv:
         patients = patients[:3]
 
-    print(f"Kyriaki Matching Evaluation")
+    print("Kyriaki Matching Evaluation")
     print(f"Patients: {len(patients)}")
     print(f"Started: {datetime.now(timezone.utc).isoformat()}")
 
     all_metrics = []
     for patient in patients:
         try:
-            metrics = await evaluate_patient(patient)
-            all_metrics.append(metrics)
+            patient_metrics = await evaluate_patient(patient)
+            all_metrics.append(patient_metrics)
         except Exception as e:
             print(f"\n  ERROR evaluating {patient['id']}: {type(e).__name__}: {e}")
             all_metrics.append(
@@ -353,16 +400,32 @@ async def main():
             )
 
     print_summary(all_metrics)
+    totals = _aggregate_totals(all_metrics)
 
-    # Save results
+    # Save latest run
     output = {
         "run_at": datetime.now(timezone.utc).isoformat(),
         "patients": len(patients),
+        "totals": totals,
         "metrics": all_metrics,
     }
     with open("eval/last_run.json", "w") as f:
         json.dump(output, f, indent=2, default=str)
-    print(f"\nResults saved to eval/last_run.json")
+    print("\nResults saved to eval/last_run.json")
+    print(
+        f"\nTotals: ${totals['total_cost_usd']} total / ${totals['avg_cost_per_patient_usd']}/patient, "
+        f"{totals['total_claude_calls']} calls, cache hit {totals['avg_cache_hit_ratio']:.1%}"
+    )
+
+    if snapshot_mode:
+        baselines_dir = Path("eval/baselines")
+        baselines_dir.mkdir(parents=True, exist_ok=True)
+        date_tag = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        suffix = "-quick" if "--quick" in sys.argv else ""
+        baseline_path = baselines_dir / f"{date_tag}{suffix}.json"
+        with baseline_path.open("w") as f:
+            json.dump(output, f, indent=2, default=str)
+        print(f"Baseline saved to {baseline_path}")
 
 
 if __name__ == "__main__":

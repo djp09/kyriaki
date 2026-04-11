@@ -69,6 +69,7 @@ class MatchResponse(BaseModel):
     patient_summary: str
     matches: list[TrialMatch]
     total_trials_screened: int
+    run_id: str | None = None
     disclaimer: str = (
         "These results are for informational purposes only and do not constitute medical advice. "
         "Please discuss all findings with your oncologist before making any treatment decisions."

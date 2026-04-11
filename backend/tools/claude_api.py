@@ -11,9 +11,11 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 
 import anthropic
 
+import metrics as metrics_mod
 from config import get_settings
 from logging_config import get_logger
 from phi.boundary import to_external_llm
@@ -93,17 +95,27 @@ async def call_claude_with_retry(
                 create_kwargs["tools"] = payload.tools
             if system_blocks:
                 create_kwargs["system"] = system_blocks
+            t0 = time.monotonic()
             response = await client.messages.create(**create_kwargs)
+            wall_ms = (time.monotonic() - t0) * 1000.0
             usage = getattr(response, "usage", None)
             if usage is not None:
+                call = metrics_mod.record_call(
+                    model=payload.model,
+                    usage=usage,
+                    wall_ms=wall_ms,
+                )
                 logger.info(
                     "claude.call",
                     model=payload.model,
-                    input_tokens=getattr(usage, "input_tokens", 0),
-                    output_tokens=getattr(usage, "output_tokens", 0),
-                    cache_creation_input_tokens=getattr(usage, "cache_creation_input_tokens", 0) or 0,
-                    cache_read_input_tokens=getattr(usage, "cache_read_input_tokens", 0) or 0,
+                    input_tokens=call.input_tokens,
+                    output_tokens=call.output_tokens,
+                    cache_creation_input_tokens=call.cache_creation_input_tokens,
+                    cache_read_input_tokens=call.cache_read_input_tokens,
                     system_blocks=len(system_blocks) if system_blocks else 0,
+                    wall_ms=round(wall_ms, 1),
+                    cost_usd=round(call.cost_usd, 6),
+                    run_id=call.run_id,
                 )
             return response
         except anthropic.RateLimitError:

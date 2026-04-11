@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 
+import metrics as metrics_mod
 from config import get_settings
 from logging_config import get_logger
 from models import PatientProfile, TrialMatch
@@ -204,6 +205,16 @@ async def match_trials(patient: PatientProfile, max_results: int = 10) -> dict:
     from tools.trial_classifier import canonical_search_term
 
     settings = get_settings()
+    run = metrics_mod.start_run(agent="matching_engine")
+    try:
+        result = await _match_trials_impl(patient, max_results, settings, canonical_search_term)
+    finally:
+        metrics_mod.end_run()
+    result["run_id"] = run.run_id
+    return result
+
+
+async def _match_trials_impl(patient, max_results, settings, canonical_search_term):
 
     candidate_count = min(max(max_results * 2, 6), settings.default_page_size)
     query_intr, query_term = biomarker_search_terms(patient.biomarkers or [])

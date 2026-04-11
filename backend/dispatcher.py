@@ -229,81 +229,92 @@ async def _execute_task(
     await emit("started")
     await flush_events()
 
+    import metrics as metrics_mod
+
+    metrics_mod.start_run(agent=agent_type, run_id=str(task.id))
+
     try:
-        agent = _registry[agent_type]()
-        ctx = AgentContext(task_id=task.id, patient_id=patient_id, input_data=input_data, emit=emit, db_session=session)
-        result = await agent.execute(ctx)
-    except Exception as e:
-        task.status = TaskStatus.failed.value
-        task.error = f"{type(e).__name__}: {e}"
-        task.completed_at = datetime.now(timezone.utc)
-        await emit("failed", {"error": task.error})
-        await flush_events()
-        logger.error("task.failed", task_id=str(task.id), agent_type=agent_type, error=task.error)
-        return
+        try:
+            agent = _registry[agent_type]()
+            ctx = AgentContext(
+                task_id=task.id, patient_id=patient_id, input_data=input_data, emit=emit, db_session=session
+            )
+            result = await agent.execute(ctx)
+        except Exception as e:
+            task.status = TaskStatus.failed.value
+            task.error = f"{type(e).__name__}: {e}"
+            task.completed_at = datetime.now(timezone.utc)
+            await emit("failed", {"error": task.error})
+            await flush_events()
+            logger.error("task.failed", task_id=str(task.id), agent_type=agent_type, error=task.error)
+            return
 
-    if result.gate_request:
-        task.status = TaskStatus.blocked.value
-        task.output_data = result.output_data
-        gate = HumanGateDB(
-            task_id=task.id,
-            gate_type=result.gate_request.gate_type,
-            status="pending",
-            requested_data=result.gate_request.requested_data,
-        )
-        session.add(gate)
-        await session.flush()  # flush to get gate.id
-        await _update_pipeline_state(session, patient_id, gate_id=gate.id)
-        await emit("blocked", {"gate_type": result.gate_request.gate_type})
-        logger.info("task.blocked", task_id=str(task.id), gate_type=result.gate_request.gate_type)
-    elif result.success:
-        task.status = TaskStatus.completed.value
-        task.output_data = result.output_data
-        task.completed_at = datetime.now(timezone.utc)
-        await _update_pipeline_state(session, patient_id, completed_stage=stage)
+        if result.gate_request:
+            task.status = TaskStatus.blocked.value
+            task.output_data = result.output_data
+            gate = HumanGateDB(
+                task_id=task.id,
+                gate_type=result.gate_request.gate_type,
+                status="pending",
+                requested_data=result.gate_request.requested_data,
+            )
+            session.add(gate)
+            await session.flush()  # flush to get gate.id
+            await _update_pipeline_state(session, patient_id, gate_id=gate.id)
+            await emit("blocked", {"gate_type": result.gate_request.gate_type})
+            logger.info("task.blocked", task_id=str(task.id), gate_type=result.gate_request.gate_type)
+        elif result.success:
+            task.status = TaskStatus.completed.value
+            task.output_data = result.output_data
+            task.completed_at = datetime.now(timezone.utc)
+            await _update_pipeline_state(session, patient_id, completed_stage=stage)
 
-        # Persist trial watches when matching completes
-        if agent_type == "matching" and result.output_data:
-            matches = result.output_data.get("matches", [])
-            watch_data = [
-                {"nct_id": m["nct_id"], "last_status": m.get("overall_status", "")} for m in matches if m.get("nct_id")
-            ]
-            if watch_data:
-                await upsert_trial_watches(session, patient_id, watch_data)
-
-        await emit("completed")
-        logger.info("task.completed", task_id=str(task.id), agent_type=agent_type)
-
-        # Auto-chain: matching → dossier (if configured)
-        if agent_type == "matching" and result.output_data:
-            from config import get_settings as _get_settings
-
-            if _get_settings().auto_chain_matching_to_dossier:
+            # Persist trial watches when matching completes
+            if agent_type == "matching" and result.output_data:
                 matches = result.output_data.get("matches", [])
-                if matches:
-                    logger.info("dispatcher.auto_chain", from_agent="matching", to_agent="dossier")
-                    # Note: this is a synchronous dispatch within the same session,
-                    # not background, since we're already in a background task
-                    dossier_task = _create_task(
-                        session,
-                        "dossier",
-                        patient_id,
-                        {
-                            "matches": matches,
-                            "patient_summary": result.output_data.get("patient_summary", ""),
-                        },
-                        task.id,
-                    )
-                    await session.flush()
-                    await _execute_task(session, dossier_task, "dossier", patient_id, dossier_task.input_data)
-    else:
-        task.status = TaskStatus.failed.value
-        task.error = result.error
-        task.completed_at = datetime.now(timezone.utc)
-        await emit("failed", {"error": result.error})
-        logger.error("task.failed", task_id=str(task.id), agent_type=agent_type, error=result.error)
+                watch_data = [
+                    {"nct_id": m["nct_id"], "last_status": m.get("overall_status", "")}
+                    for m in matches
+                    if m.get("nct_id")
+                ]
+                if watch_data:
+                    await upsert_trial_watches(session, patient_id, watch_data)
 
-    await flush_events()
+            await emit("completed")
+            logger.info("task.completed", task_id=str(task.id), agent_type=agent_type)
+
+            # Auto-chain: matching → dossier (if configured)
+            if agent_type == "matching" and result.output_data:
+                from config import get_settings as _get_settings
+
+                if _get_settings().auto_chain_matching_to_dossier:
+                    matches = result.output_data.get("matches", [])
+                    if matches:
+                        logger.info("dispatcher.auto_chain", from_agent="matching", to_agent="dossier")
+                        # Note: this is a synchronous dispatch within the same session,
+                        # not background, since we're already in a background task
+                        dossier_task = _create_task(
+                            session,
+                            "dossier",
+                            patient_id,
+                            {
+                                "matches": matches,
+                                "patient_summary": result.output_data.get("patient_summary", ""),
+                            },
+                            task.id,
+                        )
+                        await session.flush()
+                        await _execute_task(session, dossier_task, "dossier", patient_id, dossier_task.input_data)
+        else:
+            task.status = TaskStatus.failed.value
+            task.error = result.error
+            task.completed_at = datetime.now(timezone.utc)
+            await emit("failed", {"error": result.error})
+            logger.error("task.failed", task_id=str(task.id), agent_type=agent_type, error=result.error)
+
+        await flush_events()
+    finally:
+        metrics_mod.end_run()
 
 
 def _create_task(
