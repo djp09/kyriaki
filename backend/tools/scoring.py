@@ -124,9 +124,28 @@ def calculate_match_score(
     unknown = len([e for e in inclusion if e.get("status") == "INSUFFICIENT_INFO"])
     total = len(inclusion)
 
-    # Met criteria count fully, unknown count partially (0.15 weight — tightened
-    # from 0.3 so incomplete data doesn't inflate scores).
-    base_score = 50.0 if total == 0 else ((met * 1.0 + unknown * 0.15) / total) * 100
+    # Score based on DEFINITIVE answers only (Session 4 fix). Previously used
+    # `(met + unknown * 0.15) / total`, but that drags the score down whenever
+    # Claude evaluates more criteria — even if the patient is unchanged. The
+    # old prompt was being output-truncated at 2500 tokens, so it only ever
+    # returned the first 8-10 criteria. After compacting the output schema we
+    # get full evaluations, including labs/washout criteria that default to
+    # INSUFFICIENT_INFO; under the old formula those new unknowns inflated
+    # the denominator and tanked the score.
+    #
+    # New formula: score = met / (met + not_met), then linearly dampened by
+    # how confidently we know the answers (definitive / total). A 5-met trial
+    # with 0 unknowns scores higher than a 5-met trial with 20 unknowns —
+    # both have the same met ratio but different evidence depth. Unknown
+    # criteria don't drag the raw score; they only reduce confidence. If
+    # everything is unknown, fall back to a neutral 30.
+    definitive = met + not_met
+    if definitive == 0:
+        base_score = 30.0
+    else:
+        raw = (met / definitive) * 100
+        confidence_factor = definitive / max(total, 1)
+        base_score = raw * confidence_factor + 30.0 * (1 - confidence_factor)
 
     # --- Confidence adjustment ---
     # High-confidence MET criteria are worth more

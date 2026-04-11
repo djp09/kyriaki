@@ -401,7 +401,13 @@ Trial criteria and patient reports often use different names for the same drug. 
 ## Output Format
 Respond with ONLY a JSON object. Evaluate EVERY criterion in the user message — do not skip any.
 
-{{"criterion_evaluations": [{{"criterion_id": "<id from parsed criteria>", "criterion_text": "<the criterion>", "type": "inclusion|exclusion", "status": "MET|NOT_MET|INSUFFICIENT_INFO|TRIGGERED|NOT_TRIGGERED", "confidence": "HIGH|MEDIUM|LOW", "reasoning": "<1-2 sentences citing specific patient data>", "patient_data_used": ["<field names from patient profile>"]}}], "flags_for_oncologist": ["<items that need physician verification>"]}}
+Use the EXACT criterion_id from the input (e.g. "inc_1", "exc_3"). Do NOT
+repeat the criterion text in your output — we already have it; we look it
+up by id. Do NOT include a "type" field; we know inclusion vs exclusion
+from the id prefix. Keep reasoning to ONE sentence (≤25 words) citing
+specific patient data.
+
+{{"evals": [{{"id": "<criterion_id>", "status": "MET|NOT_MET|INSUFFICIENT_INFO|TRIGGERED|NOT_TRIGGERED", "confidence": "HIGH|MEDIUM|LOW", "reason": "<1 sentence>"}}], "flags": ["<items that need physician verification>"]}}
 """
 
 ELIGIBILITY_PATIENT_PROMPT = """\
@@ -432,7 +438,7 @@ ELIGIBILITY_USER_PROMPT = """\
 ## Parsed Criteria to Evaluate
 {parsed_criteria}
 
-Evaluate EVERY criterion above against the patient profile in your instructions. Respond with ONLY the JSON object.
+Evaluate EVERY criterion above against the patient profile in your instructions. Respond with ONLY the compact JSON object — `id` (matching input), `status`, `confidence`, `reason` (ONE sentence). No criterion_text, no type, no patient_data_used.
 """
 
 # Legacy combined prompt for backward compatibility (prompt_renderer uses this)
@@ -462,12 +468,41 @@ Patient profile:
 Write as if speaking directly to the patient ("You..."). Be compassionate but not patronizing. Mention their specific biomarker results and treatments by name so the summary feels personalized, not generic. Respond with ONLY the summary text, nothing else.
 """
 
-DOSSIER_ANALYSIS_PROMPT = """\
-You are an expert oncology clinical trial eligibility analyst conducting a DEEP eligibility review for a Verified Eligibility Dossier. This dossier will be reviewed by a patient navigator and potentially shared with a trial site coordinator.
+# Two-tier caching for dossier (Session 4):
+# DOSSIER_RULES_PROMPT shares the same drug/biomarker glossary as
+# ELIGIBILITY_RULES_PROMPT (so we get consistent reasoning across the
+# screening + dossier paths) plus dossier-specific output instructions.
+# Identical across all patients → cached cross-run by Anthropic.
+DOSSIER_RULES_PROMPT = (
+    ELIGIBILITY_RULES_PROMPT.split("## Output Format")[0]
+    + """\
+## Dossier Output Format
 
+You are conducting a DEEP eligibility review for a Verified Eligibility Dossier. The dossier is reviewed by a patient navigator and potentially shared with a trial site coordinator. Be thorough and clinical.
+
+For EACH inclusion and exclusion criterion in the trial:
+1. State the criterion exactly as written
+2. Evaluate against the patient data (met / not_met / unknown / needs_verification)
+3. Cite the specific patient data point that supports your evaluation
+4. Flag anything that needs physician verification
+
+Then provide:
+- A revised confidence score (0-100) with detailed justification
+- A plain-language summary for the patient (2-3 paragraphs, supportive tone)
+- A clinical summary for the navigator/site coordinator (structured, precise)
+- Specific next steps the patient should take
+
+Respond with ONLY a JSON object — no markdown fences, no commentary:
+{{"revised_score": <int 0-100>, "score_justification": "<detailed reasoning>", "criteria_analysis": [{{"criterion": "<exact text>", "type": "inclusion|exclusion", "status": "met|not_met|unknown|needs_verification", "evidence": "<patient data cited>", "notes": "<any caveats>"}}], "patient_summary": "<2-3 paragraphs, plain language>", "clinical_summary": "<structured for navigator/coordinator>", "next_steps": ["<action item>"], "flags": ["<items needing verification>"]}}
+"""
+)
+
+DOSSIER_PATIENT_PROMPT = """\
 ## Patient Profile
 {patient_json}
+"""
 
+DOSSIER_USER_PROMPT = """\
 ## Clinical Trial: {nct_id} — {brief_title}
 
 ### Eligibility Criteria
@@ -477,23 +512,11 @@ You are an expert oncology clinical trial eligibility analyst conducting a DEEP 
 Score: {initial_score}/100
 Summary: {initial_explanation}
 
-## Your Task
-
-Conduct a thorough, line-by-line analysis of EVERY inclusion and exclusion criterion. For each:
-1. State the criterion exactly as written
-2. Evaluate against the patient data (met/not_met/unknown/needs_verification)
-3. Cite the specific patient data point that supports your evaluation
-4. Flag anything that needs physician verification
-
-Then provide:
-- A revised confidence score with detailed justification
-- A plain-language summary for the patient (2-3 paragraphs)
-- A clinical summary for the navigator/site coordinator (structured, precise)
-- Specific next steps the patient should take
-
-Respond with ONLY a JSON object — no markdown fences, no commentary:
-{{"revised_score": <int 0-100>, "score_justification": "<detailed reasoning>", "criteria_analysis": [{{"criterion": "<exact text>", "type": "inclusion|exclusion", "status": "met|not_met|unknown|needs_verification", "evidence": "<patient data cited>", "notes": "<any caveats>"}}], "patient_summary": "<2-3 paragraphs, plain language>", "clinical_summary": "<structured for navigator/coordinator>", "next_steps": ["<action item>"], "flags": ["<items needing verification>"]}}
+Analyze every criterion above and respond with the dossier JSON object as specified in your instructions.
 """
+
+# Backward-compat: combined prompt for the legacy prompt_renderer path
+DOSSIER_ANALYSIS_PROMPT = DOSSIER_RULES_PROMPT + "\n" + DOSSIER_PATIENT_PROMPT + "\n" + DOSSIER_USER_PROMPT
 
 # --- Evaluator-optimizer: score evaluation ---
 

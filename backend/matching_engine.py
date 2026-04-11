@@ -103,12 +103,27 @@ async def _analyze_trial(
         parsed_criteria="\n".join(criteria_lines),
     )
 
+    # Compact output schema (Session 4): id/status/confidence/reason only.
+    # ~50 tokens per criterion + JSON overhead → 1500 max comfortably fits
+    # 25+ criteria. Was 2500 before with the bloated criterion_text-repeating
+    # schema.
+    analysis_max_tokens = min(1800, max(1000, len(criteria_lines) * 80))
+
+    # Build the parsed-criteria lookup once. Used to hydrate the compact
+    # Claude response with the original criterion text and inclusion/exclusion
+    # type via the criterion_id.
+    parsed_by_id = {}
+    for c in parsed["inclusion_criteria"]:
+        parsed_by_id[c["id"]] = {**c, "type": "inclusion"}
+    for c in parsed["exclusion_criteria"]:
+        parsed_by_id[c["id"]] = {**c, "type": "exclusion"}
+
     for attempt in range(settings.max_retries + 1):
         try:
             response = await _paced_claude_call(
                 _get_client(),
                 model=settings.claude_model,
-                max_tokens=2500,
+                max_tokens=analysis_max_tokens,
                 messages=[{"role": "user", "content": user_msg}],
                 system=system_blocks,
                 temperature=0.0,
@@ -116,39 +131,59 @@ async def _analyze_trial(
             text = response.content[0].text.strip()
             result = _parse_json_response(text)
 
-            if result is not None and result.get("criterion_evaluations"):
-                # Step 3: Score programmatically with biomarker-aware penalties
-                evals = result["criterion_evaluations"]
-                flags = result.get("flags_for_oncologist", [])
-                from tools.trial_classifier import (
-                    classify_interventions,
-                    is_biomarker_aligned,
-                    patient_actionable_genes,
-                )
+            compact_evals = (result or {}).get("evals") or (result or {}).get("criterion_evaluations") or []
+            if compact_evals:
+                # Hydrate the compact response with parser data.
+                evals = []
+                for ev in compact_evals:
+                    cid = ev.get("id") or ev.get("criterion_id") or ""
+                    parsed_c = parsed_by_id.get(cid)
+                    if parsed_c is None:
+                        continue
+                    evals.append(
+                        {
+                            "criterion_id": cid,
+                            "criterion_text": parsed_c.get("text", ""),
+                            "type": parsed_c.get("type", "inclusion"),
+                            "category": parsed_c.get("category", "other"),
+                            "status": ev.get("status", "INSUFFICIENT_INFO"),
+                            "confidence": ev.get("confidence", "MEDIUM"),
+                            "reasoning": ev.get("reason") or ev.get("reasoning") or "",
+                            "patient_data_used": [],
+                        }
+                    )
 
-                _genes = patient_actionable_genes(patient.biomarkers or [])
-                _itypes = classify_interventions(trial)
-                _aligned, _ = is_biomarker_aligned(trial, _genes)
-                score = calculate_match_score(
-                    evals,
-                    flags,
-                    biomarker_aligned=_aligned,
-                    intervention_types=_itypes,
-                    has_actionable_genes=bool(_genes),
-                )
-                logger.info("trial.analyze_complete", nct_id=nct_id, score=score["score"], tier=score["tier"])
-                return {
-                    "match_score": score["score"],
-                    "match_tier": score["tier"],
-                    "match_explanation": score["match_explanation"],
-                    "inclusion_evaluations": [e for e in evals if e.get("type") == "inclusion"],
-                    "exclusion_evaluations": [e for e in evals if e.get("type") == "exclusion"],
-                    "flags_for_oncologist": flags,
-                    "criteria_met": score["criteria_met"],
-                    "criteria_not_met": score["criteria_not_met"],
-                    "criteria_unknown": score["criteria_unknown"],
-                    "criteria_total": score["criteria_total"],
-                }
+                if evals:
+                    flags = result.get("flags") or result.get("flags_for_oncologist") or []
+                    from tools.trial_classifier import (
+                        classify_interventions,
+                        is_biomarker_aligned,
+                        patient_actionable_genes,
+                    )
+
+                    _genes = patient_actionable_genes(patient.biomarkers or [])
+                    _itypes = classify_interventions(trial)
+                    _aligned, _ = is_biomarker_aligned(trial, _genes)
+                    score = calculate_match_score(
+                        evals,
+                        flags,
+                        biomarker_aligned=_aligned,
+                        intervention_types=_itypes,
+                        has_actionable_genes=bool(_genes),
+                    )
+                    logger.info("trial.analyze_complete", nct_id=nct_id, score=score["score"], tier=score["tier"])
+                    return {
+                        "match_score": score["score"],
+                        "match_tier": score["tier"],
+                        "match_explanation": score["match_explanation"],
+                        "inclusion_evaluations": [e for e in evals if e["type"] == "inclusion"],
+                        "exclusion_evaluations": [e for e in evals if e["type"] == "exclusion"],
+                        "flags_for_oncologist": flags,
+                        "criteria_met": score["criteria_met"],
+                        "criteria_not_met": score["criteria_not_met"],
+                        "criteria_unknown": score["criteria_unknown"],
+                        "criteria_total": score["criteria_total"],
+                    }
 
             if attempt < settings.max_retries:
                 logger.warning("trial.parse_failed", nct_id=nct_id, attempt=attempt + 1)

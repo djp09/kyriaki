@@ -127,7 +127,7 @@ async def evaluate_patient(patient_data: dict, settings=None) -> dict:
             response = await paced_claude_call(
                 get_claude_client(),
                 model=settings.claude_model,
-                max_tokens=2500,
+                max_tokens=min(1800, max(1000, len(criteria_lines) * 80)),
                 messages=[{"role": "user", "content": user_msg}],
                 system=system_blocks,
                 temperature=0.0,
@@ -138,12 +138,41 @@ async def evaluate_patient(patient_data: dict, settings=None) -> dict:
             results.append({"nct_id": nct_id, "error": f"api_error: {e}", "score": None})
             continue
 
-        if not eval_result or not eval_result.get("criterion_evaluations"):
+        compact_evals = (eval_result or {}).get("evals") or (eval_result or {}).get("criterion_evaluations") or []
+        if not compact_evals:
             results.append({"nct_id": nct_id, "error": "no_evaluations", "score": None})
             continue
 
-        evals = eval_result["criterion_evaluations"]
-        flags = eval_result.get("flags_for_oncologist", [])
+        # Hydrate compact eval response with parser metadata so scoring +
+        # downstream metrics work the same as before the schema compaction.
+        parsed_by_id = {}
+        for c in parsed["inclusion_criteria"]:
+            parsed_by_id[c["id"]] = {**c, "type": "inclusion"}
+        for c in parsed["exclusion_criteria"]:
+            parsed_by_id[c["id"]] = {**c, "type": "exclusion"}
+
+        evals = []
+        for ev in compact_evals:
+            cid = ev.get("id") or ev.get("criterion_id") or ""
+            parsed_c = parsed_by_id.get(cid)
+            if parsed_c is None:
+                continue
+            evals.append(
+                {
+                    "criterion_id": cid,
+                    "criterion_text": parsed_c.get("text", ""),
+                    "type": parsed_c.get("type", "inclusion"),
+                    "category": parsed_c.get("category", "other"),
+                    "status": ev.get("status", "INSUFFICIENT_INFO"),
+                    "confidence": ev.get("confidence", "MEDIUM"),
+                    "reasoning": ev.get("reason") or ev.get("reasoning") or "",
+                }
+            )
+        if not evals:
+            results.append({"nct_id": nct_id, "error": "no_valid_evals", "score": None})
+            continue
+
+        flags = eval_result.get("flags") or eval_result.get("flags_for_oncologist") or []
 
         # Score
         score_result = calculate_match_score(evals, flags)

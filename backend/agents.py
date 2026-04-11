@@ -1071,8 +1071,22 @@ class MatchingAgent(BaseAgent):
                 return None
             user_msg = prompt_result.data
 
-        # Adaptive max_tokens: scale with criteria count to avoid truncation
-        analysis_max_tokens = min(4000, max(1500, len(criteria_lines) * 150))
+        # Compact output schema (Session 4): each criterion evaluation is
+        # ~30-50 tokens (id, status, confidence, reason). 15 criteria fits in
+        # ~1200 tokens. We pad to 1500 to give Claude headroom for unusually
+        # long reasoning. Was up to 4000 before — that was sized for the
+        # bloated schema that repeated criterion_text in every entry.
+        analysis_max_tokens = min(1800, max(1000, len(criteria_lines) * 80))
+
+        # Build the parsed-criteria lookup once. Used to hydrate the compact
+        # Claude response with the original criterion text and inclusion/
+        # exclusion type, and to merge in the parser's category tag for
+        # downstream scoring.
+        parsed_by_id = {}
+        for c in parsed["inclusion_criteria"]:
+            parsed_by_id[c["id"]] = {**c, "type": "inclusion"}
+        for c in parsed["exclusion_criteria"]:
+            parsed_by_id[c["id"]] = {**c, "type": "exclusion"}
 
         for attempt in range(settings.max_retries + 1):
             try:
@@ -1092,24 +1106,45 @@ class MatchingAgent(BaseAgent):
                         continue
                     return None
 
-                # Step 3: Score programmatically from criterion evaluations
-                evals = result.get("criterion_evaluations", [])
-                if not evals:
+                # Step 3: Hydrate compact Claude response with parser data,
+                # then score programmatically. The compact schema only carries
+                # id/status/confidence/reason — we look up text/type/category
+                # from parsed_by_id using the id.
+                compact_evals = result.get("evals") or result.get("criterion_evaluations") or []
+                if not compact_evals:
                     logger.warning("analysis.no_evals", nct_id=nct_id, attempt=attempt + 1, keys=list(result.keys()))
                     if attempt < settings.max_retries:
                         continue
                     return None
 
-                # Merge category from parsed criteria into evaluations
-                parsed_by_id = {}
-                for c in parsed["inclusion_criteria"] + parsed["exclusion_criteria"]:
-                    parsed_by_id[c["id"]] = c
-                for ev in evals:
-                    cid = ev.get("criterion_id", "")
-                    if cid in parsed_by_id:
-                        ev["category"] = parsed_by_id[cid].get("category", "other")
+                evals = []
+                for ev in compact_evals:
+                    cid = ev.get("id") or ev.get("criterion_id") or ""
+                    parsed_c = parsed_by_id.get(cid)
+                    if parsed_c is None:
+                        # Claude hallucinated an id we don't recognize — skip.
+                        logger.warning("analysis.unknown_criterion_id", nct_id=nct_id, id=cid)
+                        continue
+                    evals.append(
+                        {
+                            "criterion_id": cid,
+                            "criterion_text": parsed_c.get("text", ""),
+                            "type": parsed_c.get("type", "inclusion"),
+                            "category": parsed_c.get("category", "other"),
+                            "status": ev.get("status", "INSUFFICIENT_INFO"),
+                            "confidence": ev.get("confidence", "MEDIUM"),
+                            "reasoning": ev.get("reason") or ev.get("reasoning") or "",
+                            "patient_data_used": [],
+                        }
+                    )
 
-                flags = result.get("flags_for_oncologist", [])
+                if not evals:
+                    logger.warning("analysis.no_valid_evals", nct_id=nct_id, attempt=attempt + 1)
+                    if attempt < settings.max_retries:
+                        continue
+                    return None
+
+                flags = result.get("flags") or result.get("flags_for_oncologist") or []
                 # Pass biomarker context to scoring for the −30 penalty + hard cap
                 from tools.trial_classifier import (
                     classify_interventions as _classify,
@@ -1133,9 +1168,8 @@ class MatchingAgent(BaseAgent):
                 )
                 logger.info("analysis.scored", nct_id=nct_id, score=score_result["score"], tier=score_result["tier"])
 
-                # Build the analysis dict in the shape downstream expects
-                inclusion_evals = [e for e in evals if e.get("type") == "inclusion"]
-                exclusion_evals = [e for e in evals if e.get("type") == "exclusion"]
+                inclusion_evals = [e for e in evals if e["type"] == "inclusion"]
+                exclusion_evals = [e for e in evals if e["type"] == "exclusion"]
 
                 return {
                     "match_score": score_result["score"],
@@ -1143,25 +1177,25 @@ class MatchingAgent(BaseAgent):
                     "match_explanation": score_result["match_explanation"],
                     "inclusion_evaluations": [
                         {
-                            "criterion": e.get("criterion_text", ""),
-                            "criterion_id": e.get("criterion_id", ""),
+                            "criterion": e["criterion_text"],
+                            "criterion_id": e["criterion_id"],
                             "type": "inclusion",
-                            "status": e.get("status", "INSUFFICIENT_INFO"),
-                            "confidence": e.get("confidence", "MEDIUM"),
-                            "explanation": e.get("reasoning", ""),
-                            "patient_data_used": e.get("patient_data_used", []),
+                            "status": e["status"],
+                            "confidence": e["confidence"],
+                            "explanation": e["reasoning"],
+                            "patient_data_used": [],
                         }
                         for e in inclusion_evals
                     ],
                     "exclusion_evaluations": [
                         {
-                            "criterion": e.get("criterion_text", ""),
-                            "criterion_id": e.get("criterion_id", ""),
+                            "criterion": e["criterion_text"],
+                            "criterion_id": e["criterion_id"],
                             "type": "exclusion",
-                            "status": e.get("status", "INSUFFICIENT_INFO"),
-                            "confidence": e.get("confidence", "MEDIUM"),
-                            "explanation": e.get("reasoning", ""),
-                            "patient_data_used": e.get("patient_data_used", []),
+                            "status": e["status"],
+                            "confidence": e["confidence"],
+                            "explanation": e["reasoning"],
+                            "patient_data_used": [],
                         }
                         for e in exclusion_evals
                     ],
@@ -1493,24 +1527,29 @@ class DossierAgent(BaseAgent):
         settings = scratchpad.state["settings"]
         patient_data = scratchpad.state["patient_data"]
 
-        prompt_result = render_prompt(
-            prompt_name="dossier_analysis",
-            patient_json=json.dumps(patient_data, indent=2),
+        # Two-tier dossier caching (Session 4): rules block (with shared
+        # drug/biomarker glossary) is cached cross-patient; patient block is
+        # cached cross-trial; only the trial-specific user message is fresh.
+        from prompts import DOSSIER_PATIENT_PROMPT, DOSSIER_RULES_PROMPT, DOSSIER_USER_PROMPT
+
+        patient_block = DOSSIER_PATIENT_PROMPT.format(patient_json=json.dumps(patient_data, indent=2))
+        system_blocks = [
+            {"type": "text", "text": DOSSIER_RULES_PROMPT},
+            {"type": "text", "text": patient_block},
+        ]
+        user_msg = DOSSIER_USER_PROMPT.format(
             nct_id=nct_id,
             brief_title=match["brief_title"],
             eligibility_criteria=match.get("eligibility_criteria", "Not available"),
             initial_score=match.get("match_score", 0),
             initial_explanation=match.get("match_explanation", ""),
         )
-        if not prompt_result.success:
-            section = build_dossier_section(match, None)
-            scratchpad.state["sections"][nct_id] = section
-            return f"Prompt failed for {nct_id}, recorded error section", False
 
         result = await claude_json_call(
-            prompt_result.data,
+            user_msg,
             model=settings.dossier_model,
             max_tokens=settings.dossier_max_tokens,
+            system=system_blocks,
         )
 
         section = build_dossier_section(match, result.data if result.success else None)
