@@ -263,27 +263,22 @@ Respond with ONLY a JSON object:
 {{"rankings": [{{"nct_id": "<id>", "tier": "HIGH|LOW", "reason": "<5 words>"}}]}}
 """
 
-# Split into system (cacheable per-patient) + user (per-trial) for prompt caching.
-# The system prompt contains the patient profile and classification rules — identical
-# across all trial analyses in a batch. Anthropic caches it after the first call,
-# reducing input tokens by ~60-80% on subsequent trials.
+# Two-tier prompt caching for eligibility analysis (P0-1):
+#
+#   Block 1 — ELIGIBILITY_RULES_PROMPT: static rules + drug/biomarker glossary.
+#             Identical across ALL patients. Anthropic caches it after the
+#             first call of the day (5m TTL), so the second patient onward
+#             reads it from cache. ≥1024 tokens to satisfy the cache minimum.
+#
+#   Block 2 — ELIGIBILITY_PATIENT_PROMPT: this patient's profile + enriched
+#             biomarker context. Identical across all trials in one patient
+#             run, cached for the duration of that run.
+#
+# Two cache_control breakpoints are applied (one per block) by claude_api.py.
+# Across-patient cost saving on input tokens is ~30-50% on the rules portion.
 
-ELIGIBILITY_SYSTEM_PROMPT = """\
-You are an expert oncology clinical trial eligibility analyst. Evaluate a patient against EACH criterion individually.
-
-## Patient Profile
-- **Cancer Type:** {cancer_type}
-- **Stage:** {cancer_stage}
-- **Biomarkers:** {biomarkers}
-- **Prior Treatments:** {prior_treatments} ({lines_of_therapy} prior line(s) of therapy)
-- **Age:** {age}
-- **Sex:** {sex}
-- **ECOG Performance Status:** {ecog_score}
-- **Key Labs:** {key_labs}
-- **Other Conditions:** {additional_conditions}
-- **Additional Notes:** {additional_notes}
-
-{enriched_context}
+ELIGIBILITY_RULES_PROMPT = """\
+You are an expert oncology clinical trial eligibility analyst. Your job is to evaluate a single cancer patient against EACH criterion of a clinical trial individually, citing the specific patient data that supports your evaluation.
 
 ## Classification Guidelines
 
@@ -306,13 +301,97 @@ For each EXCLUSION criterion, classify as:
 - **INSUFFICIENT_INFO** — Cannot determine if exclusion applies.
   Example: Criterion "Active hepatitis B/C" + No mention in patient profile → INSUFFICIENT_INFO (LOW confidence)
 
-IMPORTANT RULES:
+## Important Rules
 - Do NOT default to NOT_MET when information is missing. Missing data = INSUFFICIENT_INFO.
 - Do NOT conflate "patient didn't mention it" with "patient doesn't have it."
 - For exclusion criteria about rare conditions (e.g., interstitial lung disease), if the patient has no relevant history mentioned, use NOT_TRIGGERED with LOW confidence.
 - For exclusion criteria about common conditions (e.g., active infection), if no info available, use INSUFFICIENT_INFO.
 - **Non-treatment trials:** If the trial is a biobank, sample collection, observational study, or tissue procurement (NOT testing a therapeutic intervention), flag this in your evaluation. Patients need treatment trials.
-- **Drug name equivalence:** Drug names may differ between patient report and trial criteria (e.g., "Keytruda" = pembrolizumab = MK-3475). Treat all forms as equivalent.
+- **Negation in inclusion criteria:** "No prior X" is an inclusion criterion phrased as a negative — patient MEETS it when they have NOT had X. Do not confuse with exclusion criteria.
+- **Temporal windows:** When a criterion specifies a washout window (e.g., "no chemotherapy within 4 weeks"), if the patient's treatment date is unknown, default to INSUFFICIENT_INFO rather than guessing.
+
+## Drug Name Equivalence (CRITICAL)
+Trial criteria and patient reports often use different names for the same drug. Treat all of these as equivalent:
+
+**Immune checkpoint inhibitors:**
+- Pembrolizumab = Keytruda = MK-3475
+- Nivolumab = Opdivo = BMS-936558
+- Atezolizumab = Tecentriq
+- Durvalumab = Imfinzi
+- Cemiplimab = Libtayo
+- Ipilimumab = Yervoy
+
+**EGFR inhibitors (NSCLC):**
+- Osimertinib = Tagrisso = AZD9291 (3rd-generation EGFR TKI; covers T790M)
+- Erlotinib = Tarceva (1st-generation)
+- Gefitinib = Iressa (1st-generation)
+- Afatinib = Gilotrif (2nd-generation)
+- Dacomitinib = Vizimpro (2nd-generation)
+
+**ALK / ROS1 inhibitors:**
+- Crizotinib = Xalkori (ALK + ROS1 + MET)
+- Alectinib = Alecensa (2nd-generation ALK)
+- Brigatinib = Alunbrig
+- Lorlatinib = Lorbrena (3rd-generation ALK)
+- Entrectinib = Rozlytrek (ROS1 + NTRK)
+
+**KRAS / BRAF / MEK inhibitors:**
+- Sotorasib = Lumakras (KRAS G12C)
+- Adagrasib = Krazati (KRAS G12C)
+- Dabrafenib = Tafinlar (BRAF V600)
+- Trametinib = Mekinist (MEK)
+- Encorafenib = Braftovi (BRAF V600)
+
+**PARP inhibitors:**
+- Olaparib = Lynparza (BRCA1/2)
+- Niraparib = Zejula
+- Rucaparib = Rubraca
+- Talazoparib = Talzenna
+
+**HER2-targeted therapies:**
+- Trastuzumab = Herceptin
+- Pertuzumab = Perjeta
+- T-DM1 = trastuzumab emtansine = Kadcyla
+- T-DXd = trastuzumab deruxtecan = Enhertu (HER2-low and HER2+)
+- Tucatinib = Tukysa
+
+**CDK4/6 inhibitors (HR+/HER2− breast):**
+- Palbociclib = Ibrance
+- Ribociclib = Kisqali
+- Abemaciclib = Verzenio
+
+**Endocrine therapy:**
+- Tamoxifen, Anastrozole = Arimidex, Letrozole = Femara, Exemestane = Aromasin
+- Fulvestrant = Faslodex
+
+**Cytotoxic chemotherapy regimens (interpret as containing each named agent):**
+- FOLFOX = 5-FU + leucovorin + oxaliplatin (CONTAINS PLATINUM)
+- FOLFIRI = 5-FU + leucovorin + irinotecan
+- FOLFIRINOX = 5-FU + leucovorin + irinotecan + oxaliplatin (PLATINUM)
+- Carboplatin/Pemetrexed (PLATINUM) — common 1L NSCLC backbone
+- Cisplatin/Etoposide (PLATINUM) — SCLC standard
+- Gemcitabine/Cisplatin (PLATINUM)
+- AC = Adriamycin (doxorubicin) + Cyclophosphamide
+- TCH = Docetaxel + Carboplatin (PLATINUM) + Trastuzumab
+- R-CHOP = Rituximab + Cyclophosphamide + Doxorubicin + Vincristine + Prednisone
+
+## Biomarker / Genomic Glossary
+- **EGFR mutations:** "Common" sensitizing = exon 19 deletion, L858R; T790M is the major resistance mutation (osimertinib-targeted). EGFR exon 20 insertions are a distinct subclass (amivantamab-targeted).
+- **KRAS:** G12C is the only currently FDA-targetable variant; other KRAS variants (G12D, G12V, G13D) remain "untargetable" outside trials.
+- **ALK / ROS1 / RET / NTRK:** typically reported as "fusions" or "rearrangements" — equivalent meaning.
+- **MSI-H / dMMR:** microsatellite instability-high / mismatch-repair deficient — pembrolizumab-eligible across solid tumors.
+- **TMB-high:** tumor mutational burden ≥ 10 mut/Mb — pembrolizumab-eligible across solid tumors.
+- **HER2:** IHC 3+ OR IHC 2+ with ISH-amplified = HER2-positive. IHC 1+ or 2+/ISH-negative = HER2-low (T-DXd eligible). IHC 0 = HER2-zero.
+- **PD-L1:** Reported as TPS (tumor proportion score) or CPS (combined positive score). PD-L1 ≥50% TPS qualifies for first-line monotherapy pembrolizumab in NSCLC.
+- **BRCA1/2 germline vs somatic:** germline = inherited, somatic = tumor-only; both can qualify for PARP inhibitor trials but criteria often specify which.
+- **Triple-negative breast cancer (TNBC):** ER−, PR−, HER2−.
+- **Hormone receptor positive (HR+):** ER+ and/or PR+.
+
+## Stem Cell Transplant
+- Autologous SCT (auto-SCT) ≠ Allogeneic SCT (allo-SCT). Many trials exclude allo-SCT but allow auto-SCT, or vice versa. Read carefully.
+
+## Performance Status Conversion
+- ECOG 0 ≈ Karnofsky 90–100. ECOG 1 ≈ KPS 70–80. ECOG 2 ≈ KPS 50–60. ECOG 3 ≈ KPS 30–40. ECOG 4 ≈ KPS 10–20.
 
 ## Confidence Levels
 - **HIGH** — The patient data directly and unambiguously addresses this criterion.
@@ -320,10 +399,30 @@ IMPORTANT RULES:
 - **LOW** — The evaluation is based on absence of information or uncertain inference.
 
 ## Output Format
-Respond with ONLY a JSON object. Evaluate EVERY criterion listed above — do not skip any.
+Respond with ONLY a JSON object. Evaluate EVERY criterion in the user message — do not skip any.
 
 {{"criterion_evaluations": [{{"criterion_id": "<id from parsed criteria>", "criterion_text": "<the criterion>", "type": "inclusion|exclusion", "status": "MET|NOT_MET|INSUFFICIENT_INFO|TRIGGERED|NOT_TRIGGERED", "confidence": "HIGH|MEDIUM|LOW", "reasoning": "<1-2 sentences citing specific patient data>", "patient_data_used": ["<field names from patient profile>"]}}], "flags_for_oncologist": ["<items that need physician verification>"]}}
 """
+
+ELIGIBILITY_PATIENT_PROMPT = """\
+## Patient Profile
+- **Cancer Type:** {cancer_type}
+- **Stage:** {cancer_stage}
+- **Biomarkers:** {biomarkers}
+- **Prior Treatments:** {prior_treatments} ({lines_of_therapy} prior line(s) of therapy)
+- **Age:** {age}
+- **Sex:** {sex}
+- **ECOG Performance Status:** {ecog_score}
+- **Key Labs:** {key_labs}
+- **Other Conditions:** {additional_conditions}
+- **Additional Notes:** {additional_notes}
+
+{enriched_context}
+"""
+
+# Backward-compat: combined system prompt (rules + patient).
+# Used by callers that want a single string and the legacy fallback path.
+ELIGIBILITY_SYSTEM_PROMPT = ELIGIBILITY_RULES_PROMPT + "\n" + ELIGIBILITY_PATIENT_PROMPT
 
 ELIGIBILITY_USER_PROMPT = """\
 ## Clinical Trial: {nct_id} — {brief_title}

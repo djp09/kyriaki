@@ -11,6 +11,7 @@ import pytest
 from agent_loop import Scratchpad
 from agents import AgentContext, EnrollmentAgent, MonitorAgent, OutreachAgent
 from models import EnrollmentRequest, GateResolution, MonitorRequest, OutreachRequest, PatientProfile
+from tools import ToolResult
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -94,6 +95,10 @@ def _make_ctx(input_data):
 class TestEnrollmentAgent:
     @pytest.mark.asyncio
     async def test_produces_packet_and_gate(self, sample_patient, sample_dossier):
+        """Verifies execute() fetches site info then runs the three
+        generators in parallel (packet/prep/outreach), assembling the
+        outputs into a gated AgentResult."""
+
         agent = EnrollmentAgent()
         ctx, emitted = _make_ctx(
             {
@@ -102,30 +107,104 @@ class TestEnrollmentAgent:
             }
         )
 
-        mock_scratchpad = Scratchpad(
-            state={
-                "patient_data": sample_patient,
-                "dossier": sample_dossier,
-                "section": sample_dossier["sections"][0],
-                "trial_nct_id": "NCT05107674",
-                "nearest_site": {},
-                "packet": {"screening_checklist": [{"item": "CBC", "category": "labs"}]},
-                "prep": {"what_to_expect": "You will visit the site."},
-                "outreach": {"subject_line": "Patient candidate", "message_body": "Dear CRC..."},
-            }
-        )
-        mock_loop = AsyncMock(return_value=mock_scratchpad)
+        async def fake_claude(prompt, **kwargs):
+            # Route by unique schema keys baked into each prompt template.
+            if "patient_demographics" in prompt:  # enrollment_packet
+                return ToolResult(
+                    success=True,
+                    data={
+                        "screening_checklist": [{"item": "CBC", "category": "labs", "status": "needed"}],
+                        "diagnosis_summary": "TNBC Stage IV",
+                    },
+                )
+            if "documents_to_bring" in prompt:  # patient_prep
+                return ToolResult(
+                    success=True,
+                    data={
+                        "what_to_expect": "You will visit the site.",
+                        "documents_to_bring": ["photo ID"],
+                    },
+                )
+            if "subject_line" in prompt:  # outreach_message
+                return ToolResult(
+                    success=True,
+                    data={
+                        "subject_line": "Patient candidate",
+                        "message_body": "Dear CRC...",
+                        "follow_up_notes": "Follow up in 3 days.",
+                    },
+                )
+            return ToolResult(success=False, error=f"Unexpected prompt: {prompt[:100]}")
 
-        with patch("agents.run_agent_loop", mock_loop):
+        mock_fetch = AsyncMock(
+            return_value=ToolResult(
+                success=True,
+                data={
+                    "locations": [
+                        {
+                            "facility": "Memorial Cancer Center",
+                            "city": "Los Angeles",
+                            "state": "CA",
+                            "contacts": [{"name": "Dr. Jane Coordinator"}],
+                        }
+                    ]
+                },
+            )
+        )
+
+        with (
+            patch("agents.claude_json_call", side_effect=fake_claude),
+            patch("agents.fetch_trial_tool", mock_fetch),
+        ):
             result = await agent.execute(ctx)
 
         assert result.success is True
         assert result.gate_request is not None
         assert result.gate_request.gate_type == "enrollment_review"
-        assert "patient_packet" in result.output_data
-        assert "patient_prep_guide" in result.output_data
-        assert "outreach_draft" in result.output_data
         assert result.output_data["trial_nct_id"] == "NCT05107674"
+        assert result.output_data["patient_packet"]["screening_checklist"][0]["item"] == "CBC"
+        assert result.output_data["patient_prep_guide"]["what_to_expect"]
+        assert result.output_data["outreach_draft"]["subject_line"] == "Patient candidate"
+        event_names = {name for name, _ in emitted}
+        assert "enrollment.fetch_site_start" in event_names
+        assert "enrollment.generation_start" in event_names
+        assert "enrollment.generation_complete" in event_names
+
+    @pytest.mark.asyncio
+    async def test_runs_handlers_in_parallel(self, sample_dossier):
+        """Verifies that packet, prep, and outreach generators run
+        concurrently rather than sequentially. We enforce this by making
+        each mocked Claude call wait on a shared barrier — if they run
+        in sequence, the barrier will deadlock and the test will time out."""
+        import asyncio
+
+        agent = EnrollmentAgent()
+        ctx, _ = _make_ctx(
+            {
+                "dossier": sample_dossier,
+                "trial_nct_id": "NCT05107674",
+            }
+        )
+
+        barrier = asyncio.Barrier(3)
+
+        async def fake_claude(prompt, **kwargs):
+            await barrier.wait()
+            if "patient_demographics" in prompt:
+                return ToolResult(success=True, data={"screening_checklist": []})
+            if "documents_to_bring" in prompt:
+                return ToolResult(success=True, data={"what_to_expect": "OK"})
+            return ToolResult(success=True, data={"subject_line": "Hi"})
+
+        mock_fetch = AsyncMock(return_value=ToolResult(success=True, data={"locations": []}))
+
+        with (
+            patch("agents.claude_json_call", side_effect=fake_claude),
+            patch("agents.fetch_trial_tool", mock_fetch),
+        ):
+            result = await asyncio.wait_for(agent.execute(ctx), timeout=5.0)
+
+        assert result.success is True
 
     @pytest.mark.asyncio
     async def test_missing_dossier_section(self, sample_patient, sample_dossier):

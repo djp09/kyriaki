@@ -52,9 +52,12 @@ async def call_claude_with_retry(
     which enforces HIPAA Safe Harbor de-identification. See ADR-004.
 
     When *system* is provided it is sent as the ``system`` parameter to the
-    Anthropic API with ``cache_control: {"type": "ephemeral"}`` on the last
-    block, enabling prompt caching for repeated calls that share the same
-    system prompt.
+    Anthropic API with ``cache_control: {"type": "ephemeral"}`` applied to
+    each block, enabling two-tier prompt caching (Anthropic allows up to 4
+    cache breakpoints). Pass a list of text blocks to get true multi-tier
+    caching — e.g., ``[rules_block, patient_block]`` gives one cache for
+    static rules reused across patients, and a second cache for the
+    per-patient context reused across every trial in the run.
     """
     payload = to_external_llm(
         model=model,
@@ -67,11 +70,15 @@ async def call_claude_with_retry(
     if payload.redaction_report:
         logger.info("phi.boundary.redacted", **payload.redaction_report)
 
-    # Apply cache_control to the last system block for Anthropic prompt caching
+    # Apply cache_control to every system block (up to Anthropic's 4-breakpoint
+    # limit) so each block can be independently cached. A breakpoint on a
+    # prefix shorter than the model's minimum (1024 for Sonnet/Opus, 2048 for
+    # Haiku) is silently ignored by the API, so it's safe to mark small blocks.
     system_blocks = None
     if payload.system:
         system_blocks = [dict(b) for b in payload.system]
-        system_blocks[-1]["cache_control"] = {"type": "ephemeral"}
+        for block in system_blocks[:4]:
+            block["cache_control"] = {"type": "ephemeral"}
 
     for attempt in range(max_retries):
         try:
@@ -86,7 +93,19 @@ async def call_claude_with_retry(
                 create_kwargs["tools"] = payload.tools
             if system_blocks:
                 create_kwargs["system"] = system_blocks
-            return await client.messages.create(**create_kwargs)
+            response = await client.messages.create(**create_kwargs)
+            usage = getattr(response, "usage", None)
+            if usage is not None:
+                logger.info(
+                    "claude.call",
+                    model=payload.model,
+                    input_tokens=getattr(usage, "input_tokens", 0),
+                    output_tokens=getattr(usage, "output_tokens", 0),
+                    cache_creation_input_tokens=getattr(usage, "cache_creation_input_tokens", 0) or 0,
+                    cache_read_input_tokens=getattr(usage, "cache_read_input_tokens", 0) or 0,
+                    system_blocks=len(system_blocks) if system_blocks else 0,
+                )
+            return response
         except anthropic.RateLimitError:
             if attempt == max_retries - 1:
                 raise

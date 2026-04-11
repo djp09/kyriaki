@@ -37,14 +37,36 @@ from trials_client import biomarker_search_terms, search_trials
 logger = get_logger("kyriaki.matching")
 
 
+def _build_eligibility_system_blocks(patient: PatientProfile) -> list[dict]:
+    """Build the two-tier cacheable system prompt (rules + patient).
+
+    Block 1: static rules/glossary — reused across all patients.
+    Block 2: this patient's profile — reused across all trials in this run.
+    claude_api.py applies a ``cache_control`` breakpoint to each block.
+    """
+    from prompts import ELIGIBILITY_PATIENT_PROMPT, ELIGIBILITY_RULES_PROMPT
+
+    patient_vars = format_patient_for_prompt(patient)
+    patient_block = ELIGIBILITY_PATIENT_PROMPT.format(**patient_vars, enriched_context="")
+    return [
+        {"type": "text", "text": ELIGIBILITY_RULES_PROMPT},
+        {"type": "text", "text": patient_block},
+    ]
+
+
 async def _analyze_trial(
-    patient: PatientProfile, trial: dict, trial_index: int = 0, total_trials: int = 0
+    patient: PatientProfile,
+    trial: dict,
+    trial_index: int = 0,
+    total_trials: int = 0,
+    system_blocks: list[dict] | None = None,
 ) -> dict | None:
     settings = get_settings()
     label = f"{trial_index}/{total_trials}" if total_trials else ""
     nct_id = trial["nct_id"]
     logger.info("trial.analyze_start", nct_id=nct_id, label=label, title=trial["brief_title"][:60])
 
+    from prompts import ELIGIBILITY_USER_PROMPT
     from tools.criteria_parser import parse_eligibility_criteria
     from tools.scoring import calculate_match_score
 
@@ -64,21 +86,21 @@ async def _analyze_trial(
     for c in parsed["exclusion_criteria"]:
         criteria_lines.append(f"[{c['id']}] EXCLUSION ({c['category']}): {c['text']}")
 
-    # Step 2: Evaluate with Claude
-    patient_vars = format_patient_for_prompt(patient)
-    prompt_result = render_prompt(
-        prompt_name="eligibility_analysis",
-        **patient_vars,
+    # Step 2: Evaluate with Claude using two-tier cached system prompt.
+    # The system prompt (rules + patient profile) is built ONCE per match run
+    # and threaded into every trial call, so Anthropic caches:
+    #   - rules block: reused across all patients
+    #   - patient block: reused across all trials in this run
+    if system_blocks is None:
+        system_blocks = _build_eligibility_system_blocks(patient)
+
+    user_msg = ELIGIBILITY_USER_PROMPT.format(
         nct_id=nct_id,
         brief_title=trial["brief_title"],
         phase=trial["phase"],
         brief_summary=trial["brief_summary"],
         parsed_criteria="\n".join(criteria_lines),
-        enriched_context="",
     )
-    if not prompt_result.success:
-        logger.error("trial.prompt_render_failed", nct_id=nct_id, error=prompt_result.error)
-        return None
 
     for attempt in range(settings.max_retries + 1):
         try:
@@ -86,7 +108,9 @@ async def _analyze_trial(
                 _get_client(),
                 model=settings.claude_model,
                 max_tokens=2500,
-                messages=[{"role": "user", "content": prompt_result.data}],
+                messages=[{"role": "user", "content": user_msg}],
+                system=system_blocks,
+                temperature=0.0,
             )
             text = response.content[0].text.strip()
             result = _parse_json_response(text)
@@ -223,8 +247,13 @@ async def match_trials(patient: PatientProfile, max_results: int = 10) -> dict:
 
     # Concurrency is managed by AdaptiveConcurrencyLimiter in paced_claude_call
 
+    # Build the two-tier system prompt ONCE and share it across every trial
+    # analysis in this run, so Anthropic's prompt cache hits on every trial
+    # after the first (and on the rules block across patients).
+    system_blocks = _build_eligibility_system_blocks(patient)
+
     async def analyze_with_limit(trial: dict, index: int):
-        return trial, await _analyze_trial(patient, trial, index, total)
+        return trial, await _analyze_trial(patient, trial, index, total, system_blocks=system_blocks)
 
     summary_task = asyncio.create_task(_generate_patient_summary(patient))
     analysis_tasks = [analyze_with_limit(trial, i + 1) for i, trial in enumerate(trials)]

@@ -35,7 +35,6 @@ from models import (
 )
 from prompts import (
     DOSSIER_ORCHESTRATOR_PROMPT,
-    ENROLLMENT_ORCHESTRATOR_PROMPT,
     MATCHING_ORCHESTRATOR_PROMPT,
     MONITOR_ORCHESTRATOR_PROMPT,
     OUTREACH_ORCHESTRATOR_PROMPT,
@@ -197,33 +196,6 @@ DOSSIER_TOOLS = [
             },
             "required": ["nct_id", "question"],
         },
-    ),
-]
-
-ENROLLMENT_TOOLS = [
-    ToolDefinition(
-        name="fetch_site_info",
-        description="Fetch fresh trial data for site/contact details.",
-        parameters={
-            "type": "object",
-            "properties": {"nct_id": {"type": "string", "description": "Trial NCT ID"}},
-            "required": ["nct_id"],
-        },
-    ),
-    ToolDefinition(
-        name="generate_packet",
-        description="Generate the screening checklist and enrollment packet.",
-        parameters={"type": "object", "properties": {}, "required": []},
-    ),
-    ToolDefinition(
-        name="generate_prep_guide",
-        description="Generate patient preparation guide for the screening visit.",
-        parameters={"type": "object", "properties": {}, "required": []},
-    ),
-    ToolDefinition(
-        name="generate_outreach",
-        description="Draft site coordinator outreach message.",
-        parameters={"type": "object", "properties": {}, "required": []},
     ),
 ]
 
@@ -987,20 +959,30 @@ class MatchingAgent(BaseAgent):
             logger.warning("matching.prescreen_failed", error=str(e))
             return [], list(all_nct_ids)[:max_deep]
 
-    def _build_eligibility_system_prompt(self, patient: PatientProfile, biomarker_context: str = "") -> str:
-        """Build the cacheable system prompt for eligibility analysis.
+    def _build_eligibility_system_prompt(self, patient: PatientProfile, biomarker_context: str = "") -> list[dict]:
+        """Build the two-tier cacheable system prompt for eligibility analysis.
 
-        This contains the patient profile + classification rules. Identical
-        across all trial analyses in a batch, so Anthropic caches it after
-        the first call (~60-80% input token reduction on subsequent calls).
+        Returns a list of two text blocks:
+          1. Static rules + drug/biomarker glossary — identical across all
+             patients. Anthropic caches this after the first call of the day.
+          2. Per-patient profile + enriched biomarker context — identical
+             across all trials in this patient's run.
+
+        ``call_claude_with_retry`` applies a ``cache_control`` breakpoint to
+        each block, giving us two-tier caching: rules reused across every
+        patient, patient context reused across every trial in this run.
         """
-        from prompts import ELIGIBILITY_SYSTEM_PROMPT
+        from prompts import ELIGIBILITY_PATIENT_PROMPT, ELIGIBILITY_RULES_PROMPT
 
         patient_vars = format_patient_for_prompt(patient)
         enriched = ""
         if biomarker_context:
             enriched = f"## Enriched Biomarker Context\n{biomarker_context}"
-        return ELIGIBILITY_SYSTEM_PROMPT.format(**patient_vars, enriched_context=enriched)
+        patient_block = ELIGIBILITY_PATIENT_PROMPT.format(**patient_vars, enriched_context=enriched)
+        return [
+            {"type": "text", "text": ELIGIBILITY_RULES_PROMPT},
+            {"type": "text", "text": patient_block},
+        ]
 
     async def _analyze_single_trial(
         self,
@@ -1008,7 +990,7 @@ class MatchingAgent(BaseAgent):
         trial: dict,
         settings,
         biomarker_context: str = "",
-        system_prompt: str | None = None,
+        system_prompt: str | list[dict] | None = None,
     ) -> dict | None:
         """Analyze a single trial's eligibility using criterion-level decomposition.
 
@@ -1558,7 +1540,13 @@ class DossierAgent(BaseAgent):
 
 @register_agent
 class EnrollmentAgent(BaseAgent):
-    """Adaptive agent: strategizes enrollment packet creation.
+    """Enrollment packet assembler.
+
+    The three artifacts (packet, prep guide, outreach draft) have no data
+    dependency on each other beyond the shared patient/site inputs, so we
+    bypass the ReAct agent loop and run them in one parallel burst. Wall
+    clock drops from ~6s (3 sequential Sonnet calls + planning turns) to
+    ~2s (3 parallel Sonnet calls).
 
     Workflow: workflows/enrollment.md
     """
@@ -1580,45 +1568,45 @@ class EnrollmentAgent(BaseAgent):
         if not section:
             return AgentResult(success=False, error=f"No dossier section found for {trial_nct_id}")
 
-        scratchpad = Scratchpad(
-            state={
-                "patient_data": patient_dict,
-                "dossier": dossier,
-                "section": section,
-                "trial_nct_id": trial_nct_id,
-                "nearest_site": {},
-                "packet": None,
-                "prep": None,
-                "outreach": None,
+        # Step 1: fetch site info (single sequential call — cheap HTTP).
+        await ctx.emit("enrollment.fetch_site_start", {"nct_id": trial_nct_id})
+        nearest_site = await self._fetch_nearest_site(trial_nct_id)
+        await ctx.emit("enrollment.fetch_site_complete", {"has_site": bool(nearest_site)})
+
+        # Step 2: derive a minimal screening checklist from the dossier's
+        # criteria analysis so the prep guide does not need to wait on the
+        # packet generation. This decouples the three artifacts.
+        criteria_analysis = section.get("criteria_analysis", [])[:10]
+        derived_checklist = [
+            {
+                "item": c.get("criterion", ""),
+                "category": "records",
+                "status": "needed",
+                "notes": c.get("evidence", ""),
             }
-        )
+            for c in criteria_analysis
+            if c.get("criterion")
+        ]
 
-        handlers = {
-            "fetch_site_info": self._handle_fetch_site,
-            "generate_packet": self._handle_generate_packet,
-            "generate_prep_guide": self._handle_generate_prep,
-            "generate_outreach": self._handle_generate_outreach,
-        }
-
-        scratchpad = await run_agent_loop(
-            orchestrator_prompt_template=ENROLLMENT_ORCHESTRATOR_PROMPT,
-            prompt_vars={
-                "patient_summary": section.get("clinical_summary", dossier.get("patient_summary", "")),
-                "nct_id": trial_nct_id,
-                "brief_title": section.get("brief_title", ""),
-                "revised_score": section.get("revised_score", "?"),
+        # Step 3: run packet, prep guide, and outreach concurrently.
+        await ctx.emit("enrollment.generation_start", {"handlers": ["packet", "prep", "outreach"]})
+        packet_task = self._generate_packet(patient_dict, section, trial_nct_id)
+        prep_task = self._generate_prep(patient_dict, section, nearest_site, derived_checklist)
+        outreach_task = self._generate_outreach(section, dossier, nearest_site, trial_nct_id)
+        packet, prep, outreach = await asyncio.gather(packet_task, prep_task, outreach_task)
+        await ctx.emit(
+            "enrollment.generation_complete",
+            {
+                "packet_ok": packet is not None,
+                "prep_ok": prep is not None,
+                "outreach_ok": outreach is not None,
             },
-            action_handlers=handlers,
-            scratchpad=scratchpad,
-            emit=ctx.emit,
-            tool_definitions=ENROLLMENT_TOOLS,
         )
 
-        state = scratchpad.state
         output = {
-            "patient_packet": state.get("packet") or {"error": "Failed to generate"},
-            "patient_prep_guide": state.get("prep") or {"error": "Failed to generate"},
-            "outreach_draft": state.get("outreach") or {"error": "Failed to generate"},
+            "patient_packet": packet or {"error": "Failed to generate"},
+            "patient_prep_guide": prep or {"error": "Failed to generate"},
+            "outreach_draft": outreach or {"error": "Failed to generate"},
             "trial_nct_id": trial_nct_id,
             "trial_title": section.get("brief_title", ""),
         }
@@ -1629,93 +1617,86 @@ class EnrollmentAgent(BaseAgent):
             gate_request=GateRequest(gate_type="enrollment_review", requested_data=output),
         )
 
-    async def _handle_fetch_site(
-        self, decision: AgentDecision, scratchpad: Scratchpad, budget: AgentBudget
-    ) -> tuple[str, bool]:
-        nct_id = decision.params.get("nct_id", scratchpad.state["trial_nct_id"])
-        result = await fetch_trial_tool(nct_id=nct_id)
-        if not result.success:
-            return f"Could not fetch trial: {result.error}", False
-        locations = result.data.get("locations", [])
-        if locations:
-            scratchpad.state["nearest_site"] = locations[0]
-        contacts_count = sum(len(loc.get("contacts", [])) for loc in locations[:5])
-        return f"Fetched {nct_id}: {len(locations)} sites, {contacts_count} contacts", True
+    async def _fetch_nearest_site(self, nct_id: str) -> dict:
+        """Fetch the trial's first location, or an empty dict on failure."""
+        try:
+            result = await fetch_trial_tool(nct_id=nct_id)
+        except Exception as e:
+            logger.warning("enrollment.fetch_site_error", nct_id=nct_id, error=str(e))
+            return {}
+        if not result.success or not result.data:
+            return {}
+        locations = result.data.get("locations") or []
+        return locations[0] if locations else {}
 
-    async def _handle_generate_packet(
-        self, decision: AgentDecision, scratchpad: Scratchpad, budget: AgentBudget
-    ) -> tuple[str, bool]:
-        state = scratchpad.state
+    async def _generate_packet(self, patient_dict: dict, section: dict, trial_nct_id: str) -> dict | None:
         prompt_result = render_prompt(
             prompt_name="enrollment_packet",
-            patient_json=json.dumps(state["patient_data"], indent=2),
-            nct_id=state["trial_nct_id"],
-            brief_title=state["section"].get("brief_title", ""),
-            revised_score=state["section"].get("revised_score", "?"),
-            clinical_summary=state["section"].get("clinical_summary", ""),
-            criteria_json=json.dumps(state["section"].get("criteria_analysis", [])[:10], indent=2),
+            patient_json=json.dumps(patient_dict, indent=2),
+            nct_id=trial_nct_id,
+            brief_title=section.get("brief_title", ""),
+            revised_score=section.get("revised_score", "?"),
+            clinical_summary=section.get("clinical_summary", ""),
+            criteria_json=json.dumps(section.get("criteria_analysis", [])[:10], indent=2),
         )
         if not prompt_result.success:
-            return f"Prompt failed: {prompt_result.error}", False
+            logger.warning("enrollment.packet_prompt_failed", error=prompt_result.error)
+            return None
         result = await claude_json_call(prompt_result.data)
-        if result.success:
-            state["packet"] = result.data
-            items = len(result.data.get("screening_checklist", []))
-            return f"Generated packet with {items} screening items", True
-        return "Failed to generate packet", False
+        return result.data if result.success else None
 
-    async def _handle_generate_prep(
-        self, decision: AgentDecision, scratchpad: Scratchpad, budget: AgentBudget
-    ) -> tuple[str, bool]:
-        state = scratchpad.state
-        site = state.get("nearest_site", {})
+    async def _generate_prep(
+        self,
+        patient_dict: dict,
+        section: dict,
+        site: dict,
+        derived_checklist: list[dict],
+    ) -> dict | None:
         prompt_result = render_prompt(
             prompt_name="patient_prep",
-            cancer_type=state["patient_data"].get("cancer_type", ""),
-            cancer_stage=state["patient_data"].get("cancer_stage", ""),
-            age=state["patient_data"].get("age", ""),
-            brief_title=state["section"].get("brief_title", ""),
+            cancer_type=patient_dict.get("cancer_type", ""),
+            cancer_stage=patient_dict.get("cancer_stage", ""),
+            age=patient_dict.get("age", ""),
+            brief_title=section.get("brief_title", ""),
             site_name=site.get("facility", "Trial site"),
             site_city=site.get("city", ""),
             site_state=site.get("state", ""),
-            screening_checklist=json.dumps((state.get("packet") or {}).get("screening_checklist", []), indent=2),
+            screening_checklist=json.dumps(derived_checklist, indent=2),
         )
         if not prompt_result.success:
-            return f"Prompt failed: {prompt_result.error}", False
+            logger.warning("enrollment.prep_prompt_failed", error=prompt_result.error)
+            return None
         result = await claude_json_call(prompt_result.data)
-        if result.success:
-            state["prep"] = result.data
-            return "Generated patient prep guide", True
-        return "Failed to generate prep guide", False
+        return result.data if result.success else None
 
-    async def _handle_generate_outreach(
-        self, decision: AgentDecision, scratchpad: Scratchpad, budget: AgentBudget
-    ) -> tuple[str, bool]:
-        state = scratchpad.state
-        site = state.get("nearest_site", {})
+    async def _generate_outreach(
+        self,
+        section: dict,
+        dossier: dict,
+        site: dict,
+        trial_nct_id: str,
+    ) -> dict | None:
         contact_name = "Research Coordinator"
         if site.get("contacts"):
             contact_name = site["contacts"][0].get("name", "Research Coordinator")
 
         prompt_result = render_prompt(
             prompt_name="outreach_message",
-            nct_id=state["trial_nct_id"],
-            brief_title=state["section"].get("brief_title", ""),
+            nct_id=trial_nct_id,
+            brief_title=section.get("brief_title", ""),
             site_name=site.get("facility", "Trial site"),
             site_city=site.get("city", ""),
             site_state=site.get("state", ""),
             contact_name=contact_name,
-            patient_summary=state["section"].get("clinical_summary", state["dossier"].get("patient_summary", "")),
-            match_score=state["section"].get("revised_score", "?"),
-            match_rationale=state["section"].get("score_justification", ""),
+            patient_summary=section.get("clinical_summary", dossier.get("patient_summary", "")),
+            match_score=section.get("revised_score", "?"),
+            match_rationale=section.get("score_justification", ""),
         )
         if not prompt_result.success:
-            return f"Prompt failed: {prompt_result.error}", False
+            logger.warning("enrollment.outreach_prompt_failed", error=prompt_result.error)
+            return None
         result = await claude_json_call(prompt_result.data)
-        if result.success:
-            state["outreach"] = result.data
-            return "Generated outreach draft", True
-        return "Failed to generate outreach", False
+        return result.data if result.success else None
 
 
 # ---------------------------------------------------------------------------
