@@ -33,10 +33,19 @@ class Settings(BaseSettings):
 
     # Claude API
     anthropic_api_key: str = ""
-    claude_model: str = "claude-sonnet-4-20250514"
+    claude_model: str = "claude-sonnet-4-20250514"  # default for deep eligibility analysis
 
-    # Dossier agent
-    dossier_model: str = "claude-opus-4-20250514"
+    # Model-tier routing (P1-1) — Haiku for low-stakes routing/prose, Sonnet for
+    # the criterion-by-criterion reasoning that drives match quality, Opus only
+    # when the user explicitly opts into a premium dossier (see dossier_model
+    # below). Override any of these via KYRIAKI_PLANNING_MODEL etc.
+    planning_model: str = "claude-haiku-4-5-20251001"  # orchestrator routing decisions
+    summary_model: str = "claude-haiku-4-5-20251001"  # patient_summary 2-3 sentence prose
+    outreach_model: str = "claude-haiku-4-5-20251001"  # outreach personalization (~800 tokens)
+
+    # Dossier agent — Sonnet baseline (was Opus pre-P1-1). Extended thinking
+    # is added in P1-2 via dossier_thinking_budget.
+    dossier_model: str = "claude-sonnet-4-20250514"
     dossier_max_tokens: int = 4096
     dossier_top_n: int = 3
     dossier_max_concurrent: int = 3

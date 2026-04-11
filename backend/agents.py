@@ -1233,7 +1233,7 @@ class MatchingAgent(BaseAgent):
         prompt_result = render_prompt(prompt_name="patient_summary", **patient_vars)
         if not prompt_result.success:
             return self._fallback_summary(patient)
-        result = await claude_text_call(prompt_result.data)
+        result = await claude_text_call(prompt_result.data, model=get_settings().summary_model)
         if not result.success:
             return self._fallback_summary(patient)
         return result.data
@@ -1786,6 +1786,7 @@ class OutreachAgent(BaseAgent):
             f"Personalize this outreach message for {contact_name} at {facility}. "
             f"Keep the message professional and under 4 paragraphs.\n\nOriginal message:\n{original}\n\n"
             'Respond with ONLY a JSON object: {{"message_body": "<personalized message>"}}',
+            model=get_settings().outreach_model,
             max_tokens=800,
         )
         if result.success:

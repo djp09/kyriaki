@@ -330,7 +330,8 @@ async def _get_next_action(
 
     from tools.claude_api import claude_json_call
 
-    result = await claude_json_call(prompt, max_tokens=500)
+    settings = get_settings()
+    result = await claude_json_call(prompt, model=settings.planning_model, max_tokens=500)
     if not result.success:
         logger.warning("agent.planning_failed", error=result.error)
         return (
@@ -410,7 +411,7 @@ async def _get_next_action_tool_use(
     try:
         response = await paced_claude_call(
             get_claude_client(),
-            model=settings.claude_model,
+            model=settings.planning_model,
             max_tokens=500,
             messages=[{"role": "user", "content": prompt}],
             tools=tools,

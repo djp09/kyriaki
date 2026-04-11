@@ -178,7 +178,7 @@ async def _generate_patient_summary(patient: PatientProfile) -> str:
     try:
         response = await _paced_claude_call(
             _get_client(),
-            model=settings.claude_model,
+            model=settings.summary_model,
             max_tokens=300,
             messages=[{"role": "user", "content": prompt_result.data}],
         )
