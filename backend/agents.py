@@ -1531,6 +1531,32 @@ class DossierAgent(BaseAgent):
         # drug/biomarker glossary) is cached cross-patient; patient block is
         # cached cross-trial; only the trial-specific user message is fresh.
         from prompts import DOSSIER_PATIENT_PROMPT, DOSSIER_RULES_PROMPT, DOSSIER_USER_PROMPT
+        from tools.criteria_parser import parse_eligibility_criteria
+
+        # Session 5: compact dossier output schema. Parse criteria into a
+        # numbered list so Claude can reference them by id instead of
+        # restating the full text in every evaluation entry. Hydrated back
+        # to the legacy criteria_analysis shape after the call.
+        eligibility_text = match.get("eligibility_criteria", "") or ""
+        if len(eligibility_text) > 6000:
+            eligibility_text = eligibility_text[:6000] + "\n\n[Eligibility text truncated]"
+        parse_result = parse_eligibility_criteria(eligibility_text)
+        if not parse_result.success or parse_result.data["total_criteria"] == 0:
+            parsed_by_id: dict = {}
+            parsed_criteria_text = eligibility_text or "Not available"
+        else:
+            parsed = parse_result.data
+            parsed_by_id = {}
+            for c in parsed["inclusion_criteria"]:
+                parsed_by_id[c["id"]] = {**c, "type": "inclusion"}
+            for c in parsed["exclusion_criteria"]:
+                parsed_by_id[c["id"]] = {**c, "type": "exclusion"}
+            lines = []
+            for c in parsed["inclusion_criteria"]:
+                lines.append(f"[{c['id']}] INCLUSION ({c['category']}): {c['text']}")
+            for c in parsed["exclusion_criteria"]:
+                lines.append(f"[{c['id']}] EXCLUSION ({c['category']}): {c['text']}")
+            parsed_criteria_text = "\n".join(lines)
 
         patient_block = DOSSIER_PATIENT_PROMPT.format(patient_json=json.dumps(patient_data, indent=2))
         system_blocks = [
@@ -1540,7 +1566,7 @@ class DossierAgent(BaseAgent):
         user_msg = DOSSIER_USER_PROMPT.format(
             nct_id=nct_id,
             brief_title=match["brief_title"],
-            eligibility_criteria=match.get("eligibility_criteria", "Not available"),
+            parsed_criteria=parsed_criteria_text,
             initial_score=match.get("match_score", 0),
             initial_explanation=match.get("match_explanation", ""),
         )
@@ -1552,7 +1578,29 @@ class DossierAgent(BaseAgent):
             system=system_blocks,
         )
 
-        section = build_dossier_section(match, result.data if result.success else None)
+        analysis = result.data if result.success else None
+        if analysis is not None and parsed_by_id:
+            compact_evals = analysis.pop("evals", None) or analysis.get("criteria_analysis") or []
+            hydrated = []
+            for ev in compact_evals:
+                cid = ev.get("id") or ev.get("criterion_id") or ""
+                parsed_c = parsed_by_id.get(cid)
+                if parsed_c is None:
+                    if ev.get("criterion"):
+                        hydrated.append(ev)
+                    continue
+                hydrated.append(
+                    {
+                        "criterion": parsed_c.get("text", ""),
+                        "type": parsed_c.get("type", "inclusion"),
+                        "status": ev.get("status", "unknown"),
+                        "evidence": ev.get("evidence", ""),
+                        "notes": ev.get("notes", ""),
+                    }
+                )
+            analysis["criteria_analysis"] = hydrated
+
+        section = build_dossier_section(match, analysis)
         scratchpad.state["sections"][nct_id] = section
 
         revised = section.get("revised_score", "?")

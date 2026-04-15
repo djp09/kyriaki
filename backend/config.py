@@ -46,7 +46,7 @@ class Settings(BaseSettings):
     # Dossier agent — Sonnet baseline (was Opus pre-P1-1). Extended thinking
     # is added in P1-2 via dossier_thinking_budget.
     dossier_model: str = "claude-sonnet-4-20250514"
-    dossier_max_tokens: int = 4096
+    dossier_max_tokens: int = 2500
     dossier_top_n: int = 3
     dossier_max_concurrent: int = 3
 

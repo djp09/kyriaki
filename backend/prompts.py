@@ -480,11 +480,12 @@ DOSSIER_RULES_PROMPT = (
 
 You are conducting a DEEP eligibility review for a Verified Eligibility Dossier. The dossier is reviewed by a patient navigator and potentially shared with a trial site coordinator. Be thorough and clinical.
 
-For EACH inclusion and exclusion criterion in the trial:
-1. State the criterion exactly as written
-2. Evaluate against the patient data (met / not_met / unknown / needs_verification)
-3. Cite the specific patient data point that supports your evaluation
-4. Flag anything that needs physician verification
+For EACH criterion in the numbered list provided below:
+1. Evaluate against the patient data (met / not_met / unknown / needs_verification)
+2. Cite the specific patient data point that supports your evaluation (short phrase)
+3. Add a brief caveat in `notes` only if one is warranted (otherwise empty string)
+
+Reference each criterion by its bracketed id (e.g. "I3", "E7"). Do NOT restate the criterion text — it is reconstructed from the id.
 
 Then provide:
 - A revised confidence score (0-100) with detailed justification
@@ -493,7 +494,7 @@ Then provide:
 - Specific next steps the patient should take
 
 Respond with ONLY a JSON object — no markdown fences, no commentary:
-{{"revised_score": <int 0-100>, "score_justification": "<detailed reasoning>", "criteria_analysis": [{{"criterion": "<exact text>", "type": "inclusion|exclusion", "status": "met|not_met|unknown|needs_verification", "evidence": "<patient data cited>", "notes": "<any caveats>"}}], "patient_summary": "<2-3 paragraphs, plain language>", "clinical_summary": "<structured for navigator/coordinator>", "next_steps": ["<action item>"], "flags": ["<items needing verification>"]}}
+{{"revised_score": <int 0-100>, "score_justification": "<detailed reasoning>", "evals": [{{"id": "<criterion id>", "status": "met|not_met|unknown|needs_verification", "evidence": "<patient data cited>", "notes": "<caveat or empty string>"}}], "patient_summary": "<2-3 paragraphs, plain language>", "clinical_summary": "<structured for navigator/coordinator>", "next_steps": ["<action item>"], "flags": ["<items needing verification>"]}}
 """
 )
 
@@ -505,14 +506,14 @@ DOSSIER_PATIENT_PROMPT = """\
 DOSSIER_USER_PROMPT = """\
 ## Clinical Trial: {nct_id} — {brief_title}
 
-### Eligibility Criteria
-{eligibility_criteria}
+### Eligibility Criteria (numbered — reference by id)
+{parsed_criteria}
 
 ## Initial Screening Assessment
 Score: {initial_score}/100
 Summary: {initial_explanation}
 
-Analyze every criterion above and respond with the dossier JSON object as specified in your instructions.
+Analyze every criterion above and respond with the dossier JSON object as specified in your instructions. Reference each criterion by its bracketed id.
 """
 
 # Backward-compat: combined prompt for the legacy prompt_renderer path
